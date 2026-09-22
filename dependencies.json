@@ -1,0 +1,16 @@
+{
+  "reserve": {
+    "url": "https://github.com/reserve-protocol/reserve-index-dtf.git",
+    "commit": "7d97c807003c563038ec948e92eb43eabba43ef0",
+    "lockfileSha256": "b1dd884bce72678be01b93bbb25b9d7de50d59cdf295cc364493838e62a06362"
+  },
+  "v4": {
+    "url": "https://github.com/Uniswap/v4-core.git",
+    "commit": "46c6834698c48bc4a463a86d8420f4eb1d7f3b75"
+  },
+  "pnpm": "11.8.0",
+  "solc": [
+    "0.8.26",
+    "0.8.28"
+  ]
+}

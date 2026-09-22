@@ -1,0 +1,10 @@
+folio/=lib/reserve-index-dtf/contracts/
+@utils/=lib/reserve-index-dtf/contracts/utils/
+@interfaces/=lib/reserve-index-dtf/contracts/interfaces/
+@openzeppelin/contracts/=lib/reserve-index-dtf/node_modules/@openzeppelin/contracts/
+@openzeppelin/contracts-upgradeable/=lib/reserve-index-dtf/node_modules/@openzeppelin/contracts-upgradeable/
+@prb/math/=lib/reserve-index-dtf/node_modules/@prb/math/
+@reserve-protocol/trusted-fillers/=lib/reserve-index-dtf/node_modules/@reserve-protocol/trusted-fillers/
+forge-std/=lib/reserve-index-dtf/node_modules/forge-std/src/
+v4-core/=lib/v4-core/
+solmate/=lib/v4-core/lib/solmate/

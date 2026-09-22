@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+cache_path = "cache"
+libs = ["lib"]
+auto_detect_solc = true
+auto_detect_remappings = false
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+bytecode_hash = "none"
+fs_permissions = [{ access = "read", path = "./out" }]
+
+[fuzz]
+runs = 256
