@@ -6,9 +6,8 @@ import {MintSplit} from "../src/FixedFeeRegistry.sol";
 
 /// @notice What the protocol and the creator actually earn on a mint.
 contract MintFeeTest is IndexFixture {
-    /// @dev Blend's structure is owner up to 100 bps plus protocol 35. This asserts we match it,
-    ///      because "we should not earn less than Blend on mint" is a product requirement and it
-    ///      was silently untrue: the mint fee was zero until 2026-09-22.
+    /// @dev Pinned rather than assumed. A mint fee that silently reads zero costs the protocol
+    ///      every mint and looks exactly like one that is working.
     function testMintChargesOneHundredAndThirtyFiveBasisPoints() public view {
         assertEq(index.mintFee(), 0.0135e18, "1.35% total on a mint");
         assertEq(MintSplit.PROTOCOL_PORTION_FOR_35BPS, 259_259_259_259_259_259);

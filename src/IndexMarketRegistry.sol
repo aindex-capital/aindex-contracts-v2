@@ -28,7 +28,8 @@ contract IndexMarketRegistry {
     /// @notice The fee hook every market this registry creates will carry.
     /// @dev    Immutable, because it is part of the PoolKey: a registry that could change it
     ///         would be a registry that silently creates two incompatible pools for one share.
-    ///         The zero address means hookless markets, which is what this was before the fee.
+    ///         The zero address configures hookless markets, which pay liquidity providers the
+    ///         pool fee and take nothing for the protocol.
     ShareFeeHook public immutable feeHook;
 
     /// @notice The pool fee every market this registry creates carries, paid to its LPs.
@@ -96,12 +97,12 @@ contract IndexMarketRegistry {
          * pays 0.30% in total, split evenly between the people who supply the depth and the
          * people who made the thing worth trading.
          *
-         * Not zero. A zero pool fee pays LPs nothing, and this design needs outside liquidity in
-         * a way the pons design does not: there, the creator's locked position is all there is.
+         * Not zero. A zero pool fee pays liquidity providers nothing, and this design needs
+         * outside liquidity rather than a single locked position placed once at launch.
          *
-         * Was `(3000, 60, hook 0x0)` and changing it changes the pool id, so every market this
-         * registry made before is orphaned. Safe only because `managed/` has never been deployed
-         * to mainnet. It must never change again once it has.
+         * **These three values are part of the pool id.** Changing any of them points the
+         * registry at a different pool, orphaning every market it created before, so they are
+         * fixed for the life of a deployment.
          */
         return PoolKey(Currency.wrap(index < quote ? index : quote), Currency.wrap(index < quote ? quote : index),
             lpFee, 60, IHooks(address(feeHook)));

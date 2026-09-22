@@ -21,11 +21,6 @@ import {IFolio} from "folio/interfaces/IFolio.sol";
 ///         the wrong shape for a product, so it is `internal` machinery plus a bare `create` kept
 ///         for tests. `ManagedIndexFactory.createManaged` is the production path and it binds a
 ///         `MonthlyMandate` before returning.
-///
-///         This was called `IndexFactoryBase` and carried a header reading "LOCAL
-///         EVALUATION ONLY. No production deployment approval". `ManagedIndexFactory` inherits
-///         it, so that sentence was describing the production factory. Renamed and rewritten
-///         rather than left to be discovered by whoever reads it next.
 contract IndexFactoryBase is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -94,9 +89,8 @@ contract IndexFactoryBase is ReentrancyGuard {
                  * 1% a year on assets, and 1.35% on a mint.
                  *
                  * The mint fee is split by `FixedFeeRegistry`: the protocol takes 35 bps and the
-                 * creator the remaining 100. That is Blend's structure exactly, owner up to 100
-                 * plus protocol 35, and it was zero here until 2026-09-22, which meant the
-                 * protocol earned Folio's 3 bps minimum and nothing else.
+                 * creator the remaining 100. The creator's share is the larger of the two
+                 * deliberately: launching an index has to be worth doing.
                  *
                  * **This fee is the tracking band.** A share can trade up to 1.35% above net
                  * asset value before minting to sell into the premium is worth anyone's while,

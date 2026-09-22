@@ -110,7 +110,7 @@ Open `/managed/create`, `/indexes` or `/managed/<demo address>`. Connect a devel
 
 Role ids are proposer `0`, reviewer `1`, guardian `2`. One of the two other holders requests a replacement. The second confirms that request's nonce within seven days. Confirmation starts a delay of `max(7 days, mandate notice)`; the replacement wallet then has seven days to accept. Either authorizing holder can cancel or supersede a request, restarting authorization/notice. The target holder cannot veto its own replacement. Requests cannot merge role addresses; distinct addresses still need operationally independent control.
 
-Acceptance advances the authority version, invalidates every other outstanding role request, clears the pending allocation proposal and price approval, and closes any active auction. Proposal hashes bind the authority version. It preserves the monthly cooldown, asset universe, quantity limits, fees and sole engine authority of the mandate contract. Management controls and coherent snapshots expose the request, notice, expiry and current authority version. Full event history remains W4 work.
+Acceptance advances the authority version, invalidates every other outstanding role request, clears the pending allocation proposal and price approval, and closes any active auction. Proposal hashes bind the authority version. It preserves the monthly cooldown, asset universe, quantity limits, fees and sole engine authority of the mandate contract. Management controls and coherent snapshots expose the request, notice, expiry and current authority version. Full event history is not yet exposed.
 
 This recovers one unavailable key, not two. Two cooperating holders can replace the third. A compromised target may continue exercising its existing powers during notice; the surviving reviewer/guardian must use cancellation when appropriate. Key rotation does not rotate the creator's metadata authority or fee entitlement. The delay/quorum policy is a candidate requiring independent release review.
 
@@ -123,13 +123,14 @@ This recovers one unavailable key, not two. Two cooperating holders can replace 
   providers through the pool's own fee, and 15 bps to `ShareFeeHook`, split 40 creator / 40
   protocol / 20 holders. The holders' share is paid as **rising backing**, not a claim: Folio is
   23 bytes under the EIP-170 limit and cannot be subclassed, so a per-holder accumulator is
-  impossible. A mint costs **1.35%**, split 100 bps to the creator and 35 to the protocol, which
-  matches Blend. There is no redeem fee because Folio has none and `redeem` is directly callable.
+  impossible. A mint costs **1.35%**, split 100 bps to the creator and 35 to the protocol. There
+  is no redeem fee: Folio has none, and `redeem` is directly callable so a wrapper would be
+  bypassable.
 - The factory's 1% annual management rate is candidate pricing and these are not approved
   commercial terms.
 - Fresh canonical registration still fails if the pool is already initialized. A separate `adoptExisting` operation lets only the creator accept its exact reviewed price, with an expiry no more than five minutes away. The UI requires the observed quote-per-share price to be within 1% of the entered intended price, binds review to wallet/network/index/quote/price, and never automatically adopts after initialization fails. The 1% comparison is a UI guard, not an oracle or an onchain NAV constraint. Swaps that change the reviewed price make adoption revert. This neither resets a badly priced pool nor guarantees progress against continued price manipulation; unacceptable pools must remain unregistered. Adoption leaves existing LP ownership unchanged and provides no liquidity. Funding still requires a separately reviewed, bounded transaction.
 - Indicative portfolio NAV is wired to recorded platform prices on chain 4663, with optional on-chain USD feeds. Closed-bucket source, sample age, unknown underlying source age and explicit peg assumptions are exposed. No price is required for proportional issuance/redemption or secondary swaps. Missing backing prices withhold NAV. Sampled charts remain distinct from the paginated proposal/fill/fee event ledger and do not establish historical LP returns.
-- Runtime hashes are identity checks, not audits. Local native Swap events do not prove target-chain aggregator or DexScreener support.
+- Runtime hashes are identity checks, not audits. Local native Swap events do not prove target-chain aggregator or third-party indexer behaviour.
 
 See [implementation status](../../aindex/research/managed-index-implementation-status.md) for evidence and outstanding W0–W7 work. Independent review, target-chain valuation/reporting evidence, broad asset admission and price-review operations, launch recovery acceptance, approved fee terms and target-chain discovery/routing must precede public deployment. Automation, agents and strategy-vault integrations are later milestones.
 

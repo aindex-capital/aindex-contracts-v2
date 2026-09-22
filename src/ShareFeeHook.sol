@@ -26,21 +26,24 @@ interface IFolioLike {
 ///
 /// @dev    ## WHY THIS SHAPE AND NOT A CUSTOM CURVE
 ///
-///         An earlier design made the pool a facade: `beforeSwapReturnDelta` consumed the swap and
-///         a dealer filled it from inventory at NAV. It was written, tested and retired unbuilt on
-///         2026-09-22, because measuring the one other protocol running it on this chain showed
-///         what it costs. Blend's basket pools carry zero liquidity, KyberSwap returns no route
-///         for them in either direction, and DexScreener does not list them at all. Their own
-///         review test names the mechanism: with the curve bypassed, `Swap` is emitted with
-///         **zero amounts**, so every indexer that reads events sees nothing happen.
+///         An earlier design made the pool a facade: `beforeSwapReturnDelta` consumed the swap
+///         and a dealer filled it from inventory at net asset value. It was written, tested and
+///         abandoned, because a pool whose curve is bypassed is invisible to the infrastructure
+///         that makes a token tradable.
+///
+///         Two consequences, one cause. Such a pool holds no reserves, so an indexer deriving
+///         liquidity and volume from reserves lists nothing. And `Swap` is emitted with **zero
+///         amounts**, because the pool's own arithmetic never ran, so anything reading events
+///         sees no trade at all. An aggregator cannot quote what it cannot simulate, and a chart
+///         cannot draw what was never reported.
 ///
 ///         So this hook does not touch the curve. `afterSwap` only, after the pool's own
 ///         arithmetic has run and emitted a truthful `Swap`. Real reserves, real events, real
-///         price. That is what makes the share listable and quotable, and it is the entire
-///         reason the fee is taken here rather than in `beforeSwap`.
+///         price, and a fee taken from the result rather than in place of it.
 ///
-///         The pool's `lpFee` is zero and this hook charges instead, which is how pons does it on
-///         this chain and why `uniswap-v4-pons-v2` appears in aggregator route summaries.
+///         The pool keeps its own fee for liquidity providers and this hook charges on top. Both
+///         are needed: without the first nobody supplies depth, and without the second the
+///         protocol earns nothing from the depth it helped create.
 ///
 ///         ## WHERE THE FEE COMES FROM
 ///
@@ -76,11 +79,10 @@ contract ShareFeeHook is IHooks {
     ///         fee through `poolManager.take`, and `UniswapV4SwapFeeHookV1` on Base does the same
     ///         with configurable buy and sell rates.
     ///
-    ///         The earlier version of this contract took all 30 bps and left the pool fee at
-    ///         zero, copying pons. That works for pons because a pons creator's locked position
-    ///         is the only liquidity there is. Here the depth is supposed to come from anyone,
-    ///         and an LP earning nothing does not turn up. The integration check caught it by
-    ///         asserting an LP had accrued fees and finding zero.
+    ///         An earlier version took the whole fee and left the pool's own at zero. That is
+    ///         coherent only where a single locked position supplies all the liquidity there will
+    ///         ever be. Here depth is meant to come from anyone, and a provider earning nothing
+    ///         does not turn up.
     uint16 public constant FEE_BPS = 15;
 
     /// @notice What the pool itself charges, paid to liquidity providers by Uniswap.
@@ -141,7 +143,7 @@ contract ShareFeeHook is IHooks {
 
     /// @notice Bind a pool to the index whose share it trades, and to that index's creator.
     /// @dev    Called by the market registry at launch. One hook serves every index, keyed by
-    ///         pool id, which is how the pons hook serves every pons launch.
+    ///         pool id, so the address is mined once rather than per launch.
     function register(PoolKey calldata key, address share, address creator) external {
         if (msg.sender != registrar) revert NotRegistrar();
         // The pool must pay its liquidity providers. See LP_FEE_BPS.

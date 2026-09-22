@@ -36,7 +36,7 @@ contract ShareFeeHookTest is ShareMarketTest {
         deployCodeTo("out/ShareFeeHook.sol/ShareFeeHook.json", abi.encode(pm, address(this), treasury), HOOK_ADDR);
         hook = ShareFeeHook(HOOK_ADDR);
 
-        // The pool's own fee is zero: the hook charges instead, which is how pons does it here.
+        // The pool keeps its own fee for liquidity providers; the hook charges on top.
         feeKey = PoolKey(
             Currency.wrap(shareIs0 ? address(index) : address(quote)),
             Currency.wrap(shareIs0 ? address(quote) : address(index)), LP_FEE, 60, IHooks(HOOK_ADDR)
