@@ -7,7 +7,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
-import {ManagedIndexFactory} from "../../src/ManagedIndexFactory.sol";
+import {IndexFactory} from "../../src/IndexFactory.sol";
 import {MonthlyMandate} from "../../src/MonthlyMandate.sol";
 import {FixedFeeRegistry} from "../../src/FixedFeeRegistry.sol";
 
@@ -35,15 +35,7 @@ contract RobinhoodAssetsForkTest is Test {
         assets[0] = WETH; assets[1] = USDG;
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = 100e18; amounts[1] = 100e6;
-        ManagedIndexFactory factory = new ManagedIndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)), new address[](0));
-        assertFalse(factory.admissionFrozen());
-        factory.admitAssets(assets);
-        bytes32 commitment = keccak256(abi.encodePacked(keccak256(abi.encodePacked(bytes32(0), WETH)), USDG));
-        assertEq(factory.admissionCommitment(), commitment);
-        factory.freezeAdmission(2, commitment);
-        assertTrue(factory.admissionFrozen());
-        assertEq(factory.admissionOwner(), address(0));
-        emit log_named_bytes32("Frozen admission commitment", commitment);
+        IndexFactory factory = new IndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)));
         IERC20(WETH).approve(address(factory), amounts[0]);
         IERC20(USDG).approve(address(factory), amounts[1]);
         MonthlyMandate.TokenRule[] memory rules = new MonthlyMandate.TokenRule[](2);
@@ -57,8 +49,10 @@ contract RobinhoodAssetsForkTest is Test {
         assertEq(IERC20(USDG).balanceOf(address(index)),100e6);
         IERC20(WETH).approve(address(index),1e18);
         IERC20(USDG).approve(address(index),1e6);
-        index.mint(1e18,address(this),0.9997e18);
-        assertEq(index.balanceOf(address(this)),100.9997e18);
+        // Read the fee rather than hardcoding it, so a pricing change does not read as a backing bug.
+        uint256 netOut = 1e18 - (1e18 * index.mintFee() + 1e18 - 1) / 1e18;
+        index.mint(1e18,address(this),netOut);
+        assertEq(index.balanceOf(address(this)),100e18 + netOut);
         address holder = address(0xA11CE);
         index.transfer(holder,1e18);
         (address[] memory outputs,uint256[] memory minimums)=index.toAssets(1e18,Math.Rounding.Floor);

@@ -5,7 +5,8 @@ import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @notice Fixed-universe manual mandate with notice, independent price approval and one auction per cycle.
+/// @notice Manual mandate with notice, price approval and one auction per cycle, over a token universe
+///         that grows only by announcement.
 /// @dev Bounds are raw-token quantities per basket unit, NOT percentage-of-NAV guarantees.
 /// The reviewer is trusted to assess current prices; this is not an autonomous oracle policy.
 /// No arbitrary calls, engine role grants, withdrawals, fee changes or upgrades are exposed.
@@ -56,6 +57,25 @@ contract MonthlyMandate is ReentrancyGuard {
     uint256 public roleChangeNonce;
     mapping(uint8 => RoleChange) public roleChanges;
 
+    /**
+     * Adding a token to what the index may hold.
+     *
+     * The universe is not frozen at launch: a creator who cannot add next month's token has an
+     * index that ages. It grows only by announcement. A new token, with its limits, is announced
+     * and waits at least a week (longer if the index's own notice is longer) before any rebalance
+     * can use it, so holders see it coming and can redeem for free first. Any role holder can
+     * cancel an announcement. Removing needs no ceremony: a rebalance to weight zero sells a token
+     * out, Folio drops it from the basket, and `retireToken` then frees its slot.
+     */
+    struct PendingToken {
+        TokenRule rule;
+        uint256 readyAt;
+    }
+
+    uint256 public constant MAX_TOKENS = 16;
+    uint256 public constant MIN_ADDITION_NOTICE = 7 days;
+    PendingToken[] private _pendingTokens;
+
     error Unauthorized();
     error InvalidPolicy();
     error InvalidProposal();
@@ -74,11 +94,21 @@ contract MonthlyMandate is ReentrancyGuard {
     event RoleChangeCancelled(uint8 indexed role, uint256 indexed nonce);
     event RoleChanged(uint8 indexed role, uint256 indexed nonce, address indexed replacement,
         address previous, uint256 authorityVersion);
+    event TokenAnnounced(address indexed token, uint256 readyAt, uint256 maxWeight, uint256 maxTradeAmount);
+    event TokenAnnouncementCancelled(address indexed token);
+    event TokenAdded(address indexed token);
+    event TokenRetired(address indexed token);
 
     constructor(Folio index_, Config memory cfg, TokenRule[] memory tokenRules) {
+        /*
+         * One wallet may hold every role: a creator can run an index alone. What an independent
+         * reviewer would have added is a second pair of eyes on prices; without one, holders get
+         * time instead. A self-reviewed rebalance must be announced a full day ahead, and
+         * redemption is always free, so anyone who dislikes it can leave before it executes.
+         */
         if (address(index_).code.length == 0 || cfg.proposer == address(0) || cfg.reviewer == address(0)
-            || cfg.guardian == address(0) || cfg.proposer == cfg.reviewer
-            || cfg.guardian == cfg.proposer || cfg.guardian == cfg.reviewer || cfg.notice < 1 hours
+            || cfg.guardian == address(0) || cfg.notice < 1 hours
+            || (cfg.reviewer == cfg.proposer && cfg.notice < SELF_REVIEW_NOTICE)
             || cfg.interval < 28 days || cfg.auctionLength < 120 || cfg.auctionLength > 1 hours
             || cfg.maxPriceSpreadBps == 0 || cfg.maxPriceSpreadBps > 500
             || cfg.methodologyHash == bytes32(0) || tokenRules.length < 2 || tokenRules.length > 16) revert InvalidPolicy();
@@ -105,6 +135,9 @@ contract MonthlyMandate is ReentrancyGuard {
         for (uint256 i; i < assets.length; ++i) if (assets[i] != rules[i].token) revert InvalidPolicy();
         activated = true;
     }
+
+    /// @notice The shortest notice allowed when the proposer also approves prices.
+    uint256 public constant SELF_REVIEW_NOTICE = 24 hours;
 
     function _checkRoles() private view {
         if (index.getRoleMemberCount(bytes32(0)) != 1 || !index.hasRole(bytes32(0), address(this))
@@ -271,6 +304,90 @@ contract MonthlyMandate is ReentrancyGuard {
             index.closeAuction(activeAuctionPlusOne - 1);
             activeAuctionPlusOne = 0;
         }
+    }
+
+    /* -------------------------------------------------------------- the token universe */
+
+    function additionDelay() public view returns (uint256) {
+        return config.notice > MIN_ADDITION_NOTICE ? config.notice : MIN_ADDITION_NOTICE;
+    }
+
+    function pendingTokens() external view returns (PendingToken[] memory) {
+        return _pendingTokens;
+    }
+
+    /// @notice Announce a token the index may hold from `additionDelay()` from now. Proposer only.
+    /// @dev    A new token starts with no floor (`minWeight` 0): adding it never forces a purchase.
+    function announceToken(TokenRule calldata r) external {
+        if (msg.sender != config.proposer) revert Unauthorized();
+        if (!activated) revert WrongState();
+        if (rules.length + _pendingTokens.length >= MAX_TOKENS || r.token.code.length == 0
+            || r.token == address(index) || r.token == address(this) || r.minWeight != 0 || r.maxWeight == 0
+            || r.maxWeight > 1e54 || r.maxTradeAmount == 0 || _ruleIndex(r.token) != type(uint256).max
+            || _pendingIndex(r.token) != type(uint256).max) revert InvalidPolicy();
+        uint256 ready = block.timestamp + additionDelay();
+        _pendingTokens.push(PendingToken(r, ready));
+        emit TokenAnnounced(r.token, ready, r.maxWeight, r.maxTradeAmount);
+    }
+
+    /// @notice Withdraw an announcement before it is added. Any role holder.
+    function cancelToken(address token) external {
+        if (msg.sender != config.proposer && msg.sender != config.reviewer && msg.sender != config.guardian) revert Unauthorized();
+        uint256 i = _pendingIndex(token);
+        if (i == type(uint256).max) revert WrongState();
+        _removePending(i);
+        emit TokenAnnouncementCancelled(token);
+    }
+
+    /// @notice Make an announced token part of the universe once its wait is over. Proposer only.
+    /// @dev    Only between rebalances: a proposal commits to the exact token list it was queued with.
+    function addToken(address token) external {
+        if (msg.sender != config.proposer) revert Unauthorized();
+        _checkQuiet();
+        uint256 i = _pendingIndex(token);
+        if (i == type(uint256).max) revert WrongState();
+        if (block.timestamp < _pendingTokens[i].readyAt) revert TooEarly();
+        rules.push(_pendingTokens[i].rule);
+        _removePending(i);
+        emit TokenAdded(token);
+    }
+
+    /// @notice Drop a token the index no longer holds from its universe, freeing a slot. Proposer only.
+    /// @dev    Only once Folio has removed it from the basket, which happens when a rebalance sells it
+    ///         out. The universe never falls below two tokens.
+    function retireToken(address token) external {
+        if (msg.sender != config.proposer) revert Unauthorized();
+        _checkQuiet();
+        uint256 i = _ruleIndex(token);
+        if (i == type(uint256).max || rules.length <= 2) revert InvalidPolicy();
+        (address[] memory held,) = index.totalAssets();
+        for (uint256 j; j < held.length; ++j) if (held[j] == token) revert WrongState();
+        rules[i] = rules[rules.length - 1];
+        rules.pop();
+        emit TokenRetired(token);
+    }
+
+    function _checkQuiet() private view {
+        if (!activated || pending != bytes32(0)) revert WrongState();
+        if (activeAuctionPlusOne != 0) {
+            (,, uint256 endTime) = index.auctions(activeAuctionPlusOne - 1);
+            if (block.timestamp <= endTime) revert WrongState();
+        }
+    }
+
+    function _ruleIndex(address token) private view returns (uint256) {
+        for (uint256 i; i < rules.length; ++i) if (rules[i].token == token) return i;
+        return type(uint256).max;
+    }
+
+    function _pendingIndex(address token) private view returns (uint256) {
+        for (uint256 i; i < _pendingTokens.length; ++i) if (_pendingTokens[i].rule.token == token) return i;
+        return type(uint256).max;
+    }
+
+    function _removePending(uint256 i) private {
+        _pendingTokens[i] = _pendingTokens[_pendingTokens.length - 1];
+        _pendingTokens.pop();
     }
 
     function clearExpired() external {

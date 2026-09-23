@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {ManagedIndexFactory} from "./ManagedIndexFactory.sol";
+import {IndexFactory} from "./IndexFactory.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -10,11 +10,11 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
-/// @notice One creator-selected canonical hookless market per managed index.
+/// @notice One creator-selected canonical market per index, carrying the fee hook when one is configured.
 /// @dev Registration initializes a pool but is not evidence of liquidity or third-party listing.
 contract IndexMarketRegistry {
     using StateLibrary for IPoolManager;
-    ManagedIndexFactory public immutable factory;
+    IndexFactory public immutable factory;
     IPoolManager public immutable manager;
     mapping(address => bool) public quoteAllowed;
     mapping(address => PoolKey) private markets;
@@ -37,7 +37,7 @@ contract IndexMarketRegistry {
     ///         disagree and a hookless deployment still names a fee that pays its providers.
     uint24 public immutable lpFee;
 
-    constructor(ManagedIndexFactory factory_, IPoolManager manager_, ShareFeeHook feeHook_, address[] memory quotes) {
+    constructor(IndexFactory factory_, IPoolManager manager_, ShareFeeHook feeHook_, address[] memory quotes) {
         if (address(factory_).code.length == 0 || address(manager_).code.length == 0 || quotes.length == 0) revert InvalidMarket();
         factory = factory_;
         manager = manager_;
@@ -85,7 +85,11 @@ contract IndexMarketRegistry {
     }
 
     function _registrationKey(address index, address quote) private view returns (PoolKey memory) {
-        if (factory.creatorOf(index) != msg.sender || !quoteAllowed[quote] || index == quote
+        // The creator, or the factory registering on their behalf during a seeded launch. The
+        // factory only does so in the transaction that creates the index, for its creator.
+        address creator = factory.creatorOf(index);
+        if ((msg.sender != creator && msg.sender != address(factory)) || creator == address(0)
+            || !quoteAllowed[quote] || index == quote
             || Currency.unwrap(markets[index].currency0) != address(0)) revert InvalidMarket();
         return _key(index, quote);
     }

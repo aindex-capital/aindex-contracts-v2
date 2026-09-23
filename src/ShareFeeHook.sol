@@ -10,6 +10,8 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -48,16 +50,16 @@ interface IFolioLike {
 ///         ## WHERE THE FEE COMES FROM
 ///
 ///         Uniswap only lets `afterSwap` take from the **unspecified** currency, so on an
-///         exact-input swap the fee is the output token and on an exact-output swap it is the
-///         input. Across a balanced market that is roughly half SHARE and half quote, and both
-///         are handled rather than one being preferred.
+///         exact-input swap the fee is the output token, which the trader receives less of, and
+///         on an exact-output swap it is the input token, which the trader pays more of. Across a
+///         balanced market that is roughly half SHARE and half quote, and both are handled rather
+///         than one being preferred.
 ///
 ///         ## THE THREE BUCKETS
 ///
 ///         Fixed in the contract rather than settable, so "the creator takes 40%" is a property
-///         of this code and not of the values it happened to be deployed with. Same argument
-///         `IndexVault.CREATOR_SHARE_BPS` makes.
-contract ShareFeeHook is IHooks {
+///         of this code and not of the values it happened to be deployed with.
+contract ShareFeeHook is IHooks, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20;
 
@@ -128,6 +130,7 @@ contract ShareFeeHook is IHooks {
     error WrongLpFee();
     error NothingAccrued();
     error NotPayableToHolders();
+    error BuybackBelowMinimum(uint256 shares, uint256 minimum);
 
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
@@ -156,7 +159,7 @@ contract ShareFeeHook is IHooks {
 
     // ------------------------------------------------------------------ the hook
 
-    function afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
+    function afterSwap(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         external
         onlyPoolManager
         returns (bytes4, int128)
@@ -179,10 +182,25 @@ contract ShareFeeHook is IHooks {
             : (params.zeroForOne ? key.currency0 : key.currency1,
                params.zeroForOne ? delta.amount0() : delta.amount1());
 
-        // Only a positive delta is owed to the swapper and therefore available to skim.
-        if (unspecified <= 0) return (IHooks.afterSwap.selector, int128(0));
+        /*
+         * This hook's own buyback (see `payHolders`) is holders' money buying shares for holders.
+         * Charging it would pay part of that back to the creator and the protocol.
+         */
+        if (sender == address(this)) return (IHooks.afterSwap.selector, int128(0));
 
-        uint256 fee = (uint256(uint128(unspecified)) * FEE_BPS) / BPS;
+        /*
+         * Either side can carry the fee. On exact input the unspecified side is the output, which
+         * the trader is owed (positive); returning the fee pays them that much less. On exact
+         * output it is the input, which the trader owes (negative); returning the fee makes them
+         * owe that much more. Either way the hook is then credited the fee and takes it.
+         *
+         * This used to return early on a negative delta, so an exact-output swap paid the pool's
+         * LP fee and nothing else. Our own router only swaps exact input; an aggregator need not.
+         */
+        if (unspecified == 0) return (IHooks.afterSwap.selector, int128(0));
+        uint128 magnitude = unspecified > 0 ? uint128(unspecified) : uint128(-unspecified);
+
+        uint256 fee = (uint256(magnitude) * FEE_BPS) / BPS;
         if (fee == 0) return (IHooks.afterSwap.selector, int128(0));
 
         /*
@@ -235,6 +253,10 @@ contract ShareFeeHook is IHooks {
     /**
      * @notice Pay the holders' accrued fees into the index, raising backing per share.
      *
+     * @param  minSharesOut Only used when the fee is in a quote token that is not in the basket,
+     *         which is bought back into shares first. The fewest shares the caller accepts for it;
+     *         the call reverts below that. Ignored for the other two currencies.
+     *
      * @dev    Permissionless, because it is holders' money and they should not need us to move it.
      *
      *         ## WHY BACKING RATHER THAN A CLAIM, WHICH WAS TRIED
@@ -257,7 +279,7 @@ contract ShareFeeHook is IHooks {
      *         per share for every holder at once, permissionlessly, with nothing to claim, forget
      *         or round wrong.
      *
-     *         ## THE TWO CURRENCIES
+     *         ## THE THREE CURRENCIES
      *
      *         **A basket asset** goes straight in.
      *
@@ -266,12 +288,16 @@ contract ShareFeeHook is IHooks {
      *         basket returns whole, so backing per share rises by exactly the proportion a burn
      *         would give. Both steps are Folio's own public API.
      *
-     *         ## WHAT IT REFUSES
-     *
-     *         A currency that is neither is refused rather than swapped. A swap here would need a
-     *         price, and putting a price on this path is the thing the whole design avoids.
+     *         **The pool's quote token, when it is not a basket asset**, is the fee every exact-input
+     *         sell pays. It used to be refused, and with no other way out it sat here forever:
+     *         holders were owed it and could never receive it. Now it buys shares in this pool and
+     *         those are redeemed as above, a buyback and burn. That needs a price, which the rest of
+     *         this design avoids, so the caller brings one as `minSharesOut`. A caller could pass
+     *         zero and sandwich its own call; what they could take is bounded by the accrual, while
+     *         moving this pool's price enough to take it costs the fee on the capital used to move
+     *         it, both ways. Paying out often keeps the accrual, and so the prize, small.
      */
-    function payHolders(PoolKey calldata key, Currency currency) external {
+    function payHolders(PoolKey calldata key, Currency currency, uint256 minSharesOut) external {
         PoolId id = key.toId();
         Market memory m = markets[id];
         if (!m.registered) revert UnknownMarket();
@@ -288,13 +314,46 @@ contract ShareFeeHook is IHooks {
             return;
         }
 
-        if (!_isBasketAsset(m.share, token)) {
+        if (_isBasketAsset(m.share, token)) {
+            IERC20(token).safeTransfer(m.share, amount);
+            emit HoldersPaid(id, currency, amount, 0);
+            return;
+        }
+
+        // Only this pool's own other currency can be bought back through it.
+        if (!(key.currency0 == currency || key.currency1 == currency)) {
             holderFees[id][currency] = amount; // untouched; this call changes nothing
             revert NotPayableToHolders();
         }
 
-        IERC20(token).safeTransfer(m.share, amount);
-        emit HoldersPaid(id, currency, amount, 0);
+        (uint256 spent, uint256 shares) = abi.decode(poolManager.unlock(abi.encode(key, currency, amount)), (uint256, uint256));
+        if (shares < minSharesOut) revert BuybackBelowMinimum(shares, minSharesOut);
+        // A price limit can stop a swap short; whatever it did not spend stays owed to holders.
+        if (spent < amount) holderFees[id][currency] = amount - spent;
+        _returnThroughRedeem(m.share, shares);
+        emit HoldersPaid(id, currency, spent, shares);
+    }
+
+    /// @notice The buyback swap, inside the PoolManager's lock. Only the PoolManager calls this,
+    ///         and only because `payHolders` asked it to.
+    function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
+        (PoolKey memory key, Currency currency, uint256 amount) = abi.decode(data, (PoolKey, Currency, uint256));
+        bool zeroForOne = key.currency0 == currency;
+        BalanceDelta d = poolManager.swap(key, SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(amount),
+            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+        }), "");
+        (int128 inDelta, int128 outDelta) = zeroForOne ? (d.amount0(), d.amount1()) : (d.amount1(), d.amount0());
+        uint256 spent = uint256(uint128(-inDelta));
+        uint256 shares = uint256(uint128(outDelta));
+
+        // Pay what the swap used, then take the shares it bought.
+        poolManager.sync(currency);
+        IERC20(Currency.unwrap(currency)).safeTransfer(address(poolManager), spent);
+        poolManager.settle();
+        poolManager.take(zeroForOne ? key.currency1 : key.currency0, address(this), shares);
+        return abi.encode(spent, shares);
     }
 
     /// @dev Redeem shares back into the basket and return every asset to it. Net effect: supply

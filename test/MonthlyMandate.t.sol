@@ -7,24 +7,24 @@ import {IFolio} from "folio/interfaces/IFolio.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MonthlyMandate} from "../src/MonthlyMandate.sol";
-import {ManagedIndexFactory} from "../src/ManagedIndexFactory.sol";
+import {IndexFactory} from "../src/IndexFactory.sol";
 import {FixedFeeRegistry} from "../src/FixedFeeRegistry.sol";
 
 abstract contract MonthlyMandateFixture is IndexFixture {
     MonthlyMandate internal mandate;
-    ManagedIndexFactory internal managedFactory;
+    IndexFactory internal indexFactory;
     address internal reviewer = address(0xB0B);
     address internal guardian = address(0xCAFE);
 
     function setUp() public virtual override {
         super.setUp();
-        managedFactory = new ManagedIndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)), seed().assets);
-        a.approve(address(managedFactory), type(uint256).max);
-        b.approve(address(managedFactory), type(uint256).max);
+        indexFactory = new IndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)));
+        a.approve(address(indexFactory), type(uint256).max);
+        b.approve(address(indexFactory), type(uint256).max);
         MonthlyMandate.TokenRule[] memory rules = new MonthlyMandate.TokenRule[](2);
         rules[0] = MonthlyMandate.TokenRule(address(a), 0, 2e27, 100e18);
         rules[1] = MonthlyMandate.TokenRule(address(b), 0, 2e15, 100e6);
-        (index, mandate) = managedFactory.createManaged(seed(), MonthlyMandate.Config({
+        (index, mandate) = indexFactory.createManaged(seed(), MonthlyMandate.Config({
             proposer: address(this), reviewer: reviewer, guardian: guardian,
             notice: 1 hours, interval: 30 days, auctionLength: 300,
             maxPriceSpreadBps: 100, methodologyHash: keccak256("test methodology")
@@ -56,8 +56,8 @@ contract MonthlyMandateTest is MonthlyMandateFixture {
         assertEq(index.getRoleMemberCount(bytes32(0)), 1);
         assertEq(index.getRoleMember(bytes32(0), 0), address(mandate));
         assertFalse(index.hasRole(bytes32(0), address(this)));
-        assertFalse(index.hasRole(bytes32(0), address(managedFactory)));
-        assertEq(managedFactory.mandateOf(address(index)), address(mandate));
+        assertFalse(index.hasRole(bytes32(0), address(indexFactory)));
+        assertEq(indexFactory.mandateOf(address(index)), address(mandate));
         assertEq(index.balanceOf(address(this)), 1_000e18);
     }
 

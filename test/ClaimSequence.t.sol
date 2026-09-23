@@ -60,9 +60,9 @@ contract ClaimSequenceTest is MonthlyMandateFixture {
             uint256 claims = index.balanceOf(address(this)) + index.balanceOf(alice)
                 + index.balanceOf(bob) + index.balanceOf(address(0xFEE));
             assertEq(index.totalSupply(), claims + index.getPendingFeeShares(), "effective supply accounts for fee claims once");
-            assertEq(index.balanceOf(address(managedFactory)), 0);
-            assertEq(a.balanceOf(address(managedFactory)), 0);
-            assertEq(b.balanceOf(address(managedFactory)), 0);
+            assertEq(index.balanceOf(address(indexFactory)), 0);
+            assertEq(a.balanceOf(address(indexFactory)), 0);
+            assertEq(b.balanceOf(address(indexFactory)), 0);
         }
     }
     function trackedA() private view returns (uint256) {

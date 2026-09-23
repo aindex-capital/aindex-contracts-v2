@@ -7,14 +7,14 @@ import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {ManagedIndexFactory} from "../src/ManagedIndexFactory.sol";
+import {IndexFactory} from "../src/IndexFactory.sol";
 import {IndexFactoryBase} from "../src/IndexFactoryBase.sol";
 import {MonthlyMandate} from "../src/MonthlyMandate.sol";
 import {FixedFeeRegistry} from "../src/FixedFeeRegistry.sol";
 
 /// Synthetic capacity evidence, not production token compatibility or transaction gas limits.
 contract BasketCapacityTest is Test {
-    ManagedIndexFactory internal factory;
+    IndexFactory internal factory;
     IFolio.FolioBasicDetails internal seed;
     MonthlyMandate.TokenRule[] internal rules;
     MonthlyMandate.Config internal config;
@@ -26,7 +26,7 @@ contract BasketCapacityTest is Test {
         seed.name = "Sixteen asset capacity";
         seed.symbol = "CAP16";
         seed.initialShares = 1_000e18;
-        // Admission is larger than a single index: the seventeenth asset remains selectable.
+        // Any token can be held, so the limit that binds is the sixteen-asset basket.
         address[] memory admitted = new address[](17);
         for (uint256 i; i < 17; ++i) {
             uint8 decimals = i % 2 == 0 ? 18 : 6;
@@ -39,7 +39,7 @@ contract BasketCapacityTest is Test {
                 rules.push(MonthlyMandate.TokenRule(address(token), 0, 2 * 10 ** (9 + decimals), 100 * 10 ** decimals));
             }
         }
-        factory = new ManagedIndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)), admitted);
+        factory = new IndexFactory(address(new Folio()), address(new FixedFeeRegistry(address(0xFEE), 0.2e18, 0)));
         extraAsset = admitted[16];
         for (uint256 i; i < admitted.length; ++i) IERC20(admitted[i]).approve(address(factory), type(uint256).max);
         config = MonthlyMandate.Config(address(this), reviewer, address(0xCAFE), 1 hours, 30 days, 300, 100, keccak256("capacity fixture"));
@@ -108,7 +108,6 @@ contract BasketCapacityTest is Test {
     }
 
     function testSeventeenthAssetRejectedWithoutSpendingSeed() public {
-        assertTrue(factory.assetAllowed(extraAsset));
         seed.assets.push(extraAsset);
         seed.amounts.push(seed.amounts[0]);
         rules.push(MonthlyMandate.TokenRule(extraAsset, 0, 2e27, 100e18));

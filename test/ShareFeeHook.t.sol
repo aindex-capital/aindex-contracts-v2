@@ -10,6 +10,8 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
+import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 
 /// @notice The fee hook, charged on a pool whose own arithmetic still runs.
 contract ShareFeeHookTest is ShareMarketTest {
@@ -130,7 +132,7 @@ contract ShareFeeHookTest is ShareMarketTest {
         uint256 supplyBefore = index.totalSupply();
 
         vm.prank(address(0xD00D)); // permissionless
-        hook.payHolders(feeKey, out);
+        hook.payHolders(feeKey, out, 0);
 
         (, uint256[] memory afterAmounts) = index.toAssets(1e18, Math.Rounding.Floor);
         assertLt(index.totalSupply(), supplyBefore, "shares were redeemed away");
@@ -138,21 +140,70 @@ contract ShareFeeHookTest is ShareMarketTest {
         assertEq(hook.holderFees(feeKey.toId(), out), 0);
     }
 
-    function testPayHoldersRefusesACurrencyItCannotPayWith() public {
-        // A quote that is not a basket asset cannot reach holders without a swap, and a swap here
-        // would need a price. Refused, and the accrual is left intact rather than stranded.
-        Currency q = Currency.wrap(address(quote));
-        feeBuy(2e18);
+    /// @dev A sell, exact input: the fee is taken in the quote token, which is not in the basket.
+    function feeSell(uint256 shares) internal {
         vm.startPrank(alice);
         index.approve(address(router), type(uint256).max);
-        router.swapExactInput(feeKey, shareIs0, 1e17, 1, limit(shareIs0), block.timestamp);
+        router.swapExactInput(feeKey, shareIs0, shares, 1, limit(shareIs0), block.timestamp);
         vm.stopPrank();
+    }
 
+    function testQuoteHolderFeesAreBoughtBackAndBurned() public {
+        // Sells pay their fee in the quote token. It used to be refused here and stay stuck forever;
+        // now it buys shares in this pool and those are redeemed into backing.
+        Currency q = Currency.wrap(address(quote));
+        feeBuy(5e18);
+        feeSell(2e18);
         uint256 accrued = hook.holderFees(feeKey.toId(), q);
-        if (accrued == 0) return;
-        vm.expectRevert(ShareFeeHook.NotPayableToHolders.selector);
-        hook.payHolders(feeKey, q);
+        assertGt(accrued, 0, "a sell must accrue holders' share in the quote token");
+
+        (, uint256[] memory beforeAmounts) = index.toAssets(1e18, Math.Rounding.Floor);
+        uint256 supplyBefore = index.totalSupply();
+        uint256 creatorBefore = hook.creatorFees(feeKey.toId(), q) + hook.creatorFees(feeKey.toId(), Currency.wrap(address(index)));
+
+        vm.prank(address(0xD00D)); // permissionless
+        hook.payHolders(feeKey, q, 1);
+
+        assertEq(hook.holderFees(feeKey.toId(), q), 0, "the whole accrual was spent");
+        assertLt(index.totalSupply(), supplyBefore, "bought shares were redeemed away");
+        (, uint256[] memory afterAmounts) = index.toAssets(1e18, Math.Rounding.Floor);
+        assertGt(afterAmounts[0], beforeAmounts[0], "one share now claims more of the basket");
+        assertEq(hook.creatorFees(feeKey.toId(), q) + hook.creatorFees(feeKey.toId(), Currency.wrap(address(index))), creatorBefore,
+            "the hook's own buyback is not charged a fee");
+        assertEq(quote.balanceOf(address(hook)), hook.creatorFees(feeKey.toId(), q) + hook.protocolFees(feeKey.toId(), q),
+            "what the hook still holds in quote is exactly what it still owes");
+    }
+
+    function testBuybackBelowTheCallersMinimumReverts() public {
+        Currency q = Currency.wrap(address(quote));
+        feeBuy(5e18);
+        feeSell(2e18);
+        uint256 accrued = hook.holderFees(feeKey.toId(), q);
+        vm.expectRevert();
+        hook.payHolders(feeKey, q, type(uint256).max);
         assertEq(hook.holderFees(feeKey.toId(), q), accrued, "a refusal must not consume the accrual");
+    }
+
+    function testExactOutputSwapsPayTheHookFeeToo() public {
+        // Exact output: the trader fixes how many shares they get, and the input is unspecified.
+        // This used to return early and charge nothing but the LP fee.
+        PoolSwapTest swapper = new PoolSwapTest(pm);
+        quote.mint(address(this), 10e18);
+        quote.approve(address(swapper), type(uint256).max);
+        bool zeroForOne = !shareIs0; // quote in, shares out
+        Currency q = Currency.wrap(address(quote));
+        uint256 quoteBefore = quote.balanceOf(address(this));
+
+        swapper.swap(feeKey, SwapParams({zeroForOne: zeroForOne, amountSpecified: int256(1e18), sqrtPriceLimitX96: limit(zeroForOne)}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}), "");
+
+        uint256 paid = quoteBefore - quote.balanceOf(address(this));
+        uint256 taken = hook.creatorFees(feeKey.toId(), q) + hook.protocolFees(feeKey.toId(), q) + hook.holderFees(feeKey.toId(), q);
+        assertGt(taken, 0, "an exact-output swap must pay the hook fee");
+        assertEq(index.balanceOf(address(this)) >= 1e18, true, "the trader still receives exactly what they asked for");
+        // The fee is 15 bps of the input before it, so fee / (paid - fee) is the rate.
+        assertApproxEqAbs(taken * 10_000 / (paid - taken), uint256(15), 1, "15 bps, now on the input side");
+        assertEq(hook.creatorFees(feeKey.toId(), q), taken * 4_000 / 10_000, "and it splits the same way");
     }
 
     function testUnregisteredPoolCannotBeSwapped() public {

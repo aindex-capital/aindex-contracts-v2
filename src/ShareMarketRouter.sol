@@ -13,7 +13,7 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
-/// @notice ERC20-only router for ordinary, hookless v4 share markets.
+/// @notice ERC20-only router for ordinary v4 share markets, hookless or carrying the one known fee hook.
 /// @dev No approvals to PoolManager, persistent custody, NAV dependency or constituent execution.
 /// LP positions belong to msg.sender through a namespaced salt. Not independently audited.
 contract ShareMarketRouter is IUnlockCallback, ReentrancyGuard {
@@ -39,6 +39,7 @@ contract ShareMarketRouter is IUnlockCallback, ReentrancyGuard {
 
     struct Request {
         address payer;
+        address owner;
         PoolKey key;
         bool swap;
         bool quote;
@@ -152,6 +153,7 @@ contract ShareMarketRouter is IUnlockCallback, ReentrancyGuard {
         r.key = key;
         r.position = params;
         r.position.salt = positionSalt(msg.sender, params.salt);
+        r.owner = msg.sender;
         r.limit0 = limit0;
         r.limit1 = limit1;
         return _unlock(r);
@@ -188,6 +190,9 @@ contract ShareMarketRouter is IUnlockCallback, ReentrancyGuard {
         r.position = params;
         r.position.salt = positionSalt(owner, params.salt);
         r.payer = msg.sender;
+        // The factory pays for a launch seed, but the position is the creator's, and the event
+        // is what the indexer attributes it by.
+        r.owner = owner;
         r.limit0 = limit0;
         r.limit1 = limit1;
         return _unlock(r);
@@ -237,7 +242,7 @@ contract ShareMarketRouter is IUnlockCallback, ReentrancyGuard {
         }
         _settle(r.key.currency0, r.payer, delta.amount0());
         _settle(r.key.currency1, r.payer, delta.amount1());
-        if (!r.swap) emit LiquidityChanged(r.payer, PoolId.unwrap(r.key.toId()), r.position.salt,
+        if (!r.swap) emit LiquidityChanged(r.owner, PoolId.unwrap(r.key.toId()), r.position.salt,
             Currency.unwrap(r.key.currency0), Currency.unwrap(r.key.currency1), r.position.tickLower,
             r.position.tickUpper, r.position.liquidityDelta, BalanceDelta.unwrap(delta), BalanceDelta.unwrap(fees));
         return abi.encode(delta);

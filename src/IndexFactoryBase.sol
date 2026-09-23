@@ -19,7 +19,7 @@ import {IFolio} from "folio/interfaces/IFolio.sol";
 ///         `create` here produces an index with **no mandate and no market**: the creator holds
 ///         admin directly and nothing rebalances. That is the right shape for a base class and
 ///         the wrong shape for a product, so it is `internal` machinery plus a bare `create` kept
-///         for tests. `ManagedIndexFactory.createManaged` is the production path and it binds a
+///         for tests. `IndexFactory.createManaged` is the production path and it binds a
 ///         `MonthlyMandate` before returning.
 contract IndexFactoryBase is ReentrancyGuard {
     using SafeERC20 for IERC20;

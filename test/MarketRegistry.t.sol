@@ -5,7 +5,7 @@ import {MonthlyMandateFixture} from "./MonthlyMandate.t.sol";
 import {TestAsset} from "./IndexLifecycle.t.sol";
 import {IndexMarketRegistry} from "../src/IndexMarketRegistry.sol";
 import {ShareFeeHook} from "../src/ShareFeeHook.sol";
-import {ManagedIndexFactory} from "../src/ManagedIndexFactory.sol";
+import {IndexFactory} from "../src/IndexFactory.sol";
 import {ShareMarketRouter} from "../src/ShareMarketRouter.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
@@ -26,7 +26,7 @@ contract MarketRegistryTest is MonthlyMandateFixture {
         address[] memory quotes = new address[](1);
         quotes[0] = address(quote);
         // Hookless here: this suite asserts the registry itself, not the fee.
-        registry = new IndexMarketRegistry(managedFactory, pm, ShareFeeHook(address(0)), quotes);
+        registry = new IndexMarketRegistry(indexFactory, pm, ShareFeeHook(address(0)), quotes);
     }
 
     function testOnlyCreatorCanRegisterAdmittedQuote() public {
@@ -140,11 +140,11 @@ contract MarketRegistryTest is MonthlyMandateFixture {
     function testMetadataOwnerAndUnmanagedBypass() public {
         vm.prank(alice);
         vm.expectRevert();
-        managedFactory.setMetadata(address(index), "ipfs://attacker");
-        managedFactory.setMetadata(address(index), "ipfs://methodology");
-        assertEq(managedFactory.metadataURI(address(index)), "ipfs://methodology");
+        indexFactory.setMetadata(address(index), "ipfs://attacker");
+        indexFactory.setMetadata(address(index), "ipfs://methodology");
+        assertEq(indexFactory.metadataURI(address(index)), "ipfs://methodology");
         vm.expectRevert();
-        managedFactory.create(seed());
+        indexFactory.create(seed());
     }
 
     /// @dev The whole point of registering in the same transaction: the hook refuses a swap on a
@@ -156,7 +156,7 @@ contract MarketRegistryTest is MonthlyMandateFixture {
         address[] memory quotes_ = new address[](1);
         quotes_[0] = address(quote);
         IndexMarketRegistry hooked =
-            new IndexMarketRegistry(managedFactory, pm, ShareFeeHook(hookAddr), quotes_);
+            new IndexMarketRegistry(indexFactory, pm, ShareFeeHook(hookAddr), quotes_);
 
         // The registry must be the registrar for this to work, so a registry that is not one
         // cannot create a market at all rather than creating an unbound one.
@@ -169,27 +169,27 @@ contract MarketRegistryTest is MonthlyMandateFixture {
     function testMarketMustBeWiredBeforeASeededLaunch() public {
         // The factory cannot open a market it has not been told about, and it says so rather
         // than silently creating an index nobody can buy.
-        assertFalse(managedFactory.marketWired(), "not wired in this fixture");
+        assertFalse(indexFactory.marketWired(), "not wired in this fixture");
     }
 
     function testOnlyTheDeployerWiresTheMarketAndOnlyOnce() public {
-        ShareMarketRouter router = new ShareMarketRouter(pm, address(0), address(managedFactory));
+        ShareMarketRouter router = new ShareMarketRouter(pm, address(0), address(indexFactory));
         vm.prank(alice);
-        vm.expectRevert(ManagedIndexFactory.MarketAlreadyWired.selector);
-        managedFactory.wireMarket(registry, router);
+        vm.expectRevert(IndexFactory.MarketAlreadyWired.selector);
+        indexFactory.wireMarket(registry, router);
 
-        managedFactory.wireMarket(registry, router);
-        assertTrue(managedFactory.marketWired());
-        assertEq(address(managedFactory.marketRegistry()), address(registry));
+        indexFactory.wireMarket(registry, router);
+        assertTrue(indexFactory.marketWired());
+        assertEq(address(indexFactory.marketRegistry()), address(registry));
 
-        vm.expectRevert(ManagedIndexFactory.MarketAlreadyWired.selector);
-        managedFactory.wireMarket(registry, router);
+        vm.expectRevert(IndexFactory.MarketAlreadyWired.selector);
+        indexFactory.wireMarket(registry, router);
     }
 
     function testOnlyTheLauncherMayOpenAPositionForSomeoneElse() public {
         // The router lends its salt to exactly one address. Anyone else naming an owner is
         // refused, which is what keeps `modifyLiquidityFor` from being a way to move positions.
-        ShareMarketRouter router = new ShareMarketRouter(pm, address(0), address(managedFactory));
+        ShareMarketRouter router = new ShareMarketRouter(pm, address(0), address(indexFactory));
         // Read the key BEFORE expectRevert: a call in the argument list consumes the cheatcode.
         PoolKey memory k = registry.marketFor(address(index));
         vm.prank(alice);

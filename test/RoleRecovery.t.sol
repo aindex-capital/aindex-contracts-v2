@@ -205,7 +205,7 @@ contract RoleRecoveryTest is MonthlyMandateFixture {
         mandate.cancel();
     }
 
-    function testLaunchRequiresThreeDistinctRoleAddressesAndHonorsLongerNotice() public {
+    function testSharedRolesAreAllowedAndRecoveryHonorsLongerNotice() public {
         MonthlyMandate.Config memory cfg = MonthlyMandate.Config({
             proposer: address(this), reviewer: reviewer, guardian: reviewer,
             notice: 10 days, interval: 30 days, auctionLength: 300,
@@ -214,10 +214,9 @@ contract RoleRecoveryTest is MonthlyMandateFixture {
         MonthlyMandate.TokenRule[] memory rules = new MonthlyMandate.TokenRule[](2);
         rules[0] = MonthlyMandate.TokenRule(address(a), 0, 2e27, 100e18);
         rules[1] = MonthlyMandate.TokenRule(address(b), 0, 2e15, 100e6);
-        vm.expectRevert(MonthlyMandate.InvalidPolicy.selector);
+        // One wallet reviewing and guarding is allowed; so is the creator guarding its own index.
         new MonthlyMandate(index, cfg, rules);
         cfg.guardian = address(this);
-        vm.expectRevert(MonthlyMandate.InvalidPolicy.selector);
         new MonthlyMandate(index, cfg, rules);
         cfg.guardian = guardian;
         MonthlyMandate longer = new MonthlyMandate(index, cfg, rules);

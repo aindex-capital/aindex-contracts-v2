@@ -15,7 +15,7 @@ When an audit happens, one subdirectory per auditor with the report and the comm
 1. `MonthlyMandate` holds the rebalance authority and the role recovery.
 2. `ShareFeeHook` sits in the swap path of every trade.
 3. `ShareMarketRouter` moves user funds and lends its position salt to the factory.
-4. `IndexMarketRegistry` and `ManagedIndexFactory` decide what a launch is.
+4. `IndexMarketRegistry` and `IndexFactory` decide what a launch is.
 
 `lib/reserve-index-dtf` is Reserve's audited code, unmodified, pinned by commit and lockfile hash,
 and cloned immutably. That is the one part with review behind it, and the review is theirs.
