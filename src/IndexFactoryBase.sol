@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
+import {MintSplit} from "./FixedFeeRegistry.sol";
 
 /// @notice Creation, funding and fee policy shared by every index this protocol launches.
 ///
@@ -86,21 +87,28 @@ contract IndexFactoryBase is ReentrancyGuard {
                 feeRecipients: recipients,
                 immutableFeeRecipients: new IFolio.FeeRecipient[](0),
                 /*
-                 * 1% a year on assets, and 1.35% on a mint.
+                 * No yearly fee, and 0.50% on a mint: 20 bps to the protocol, 15 to holders and
+                 * 15 to the creator. `MintSplit` has the arithmetic.
                  *
-                 * The mint fee is split by `FixedFeeRegistry`: the protocol takes 35 bps and the
-                 * creator the remaining 100. The creator's share is the larger of the two
-                 * deliberately: launching an index has to be worth doing.
+                 * **No yearly fee is the holder guarantee.** Holding costs nothing, and trading and
+                 * minting both pay holders, so a holder is ahead at any volume above zero. A yearly
+                 * fee paid by holders would need volume many times the index's size to recover.
+                 * The registry's floor must be zero too, or Folio raises this back to the floor.
                  *
-                 * **This fee is the tracking band.** A share can trade up to 1.35% above net
-                 * asset value before minting to sell into the premium is worth anyone's while,
-                 * so raising it earns more per mint and lets the price wander further from what
-                 * the basket is worth. There is no redeem fee to match it: Folio has none, and
-                 * `redeem` is directly callable so a wrapper would be bypassable.
+                 * **The mint fee is the tracking band.** A share can trade up to about 0.50% plus
+                 * the pool's 0.40% above net asset value before minting to sell into the premium
+                 * is worth anyone's while. It was 1.35%, three to four times what comparable
+                 * indexes charge, which let buyers pay a premium the basket did not justify. There
+                 * is no redeem fee to match it: Folio has none, and `redeem` is directly callable
+                 * so a wrapper would be bypassable.
+                 *
+                 * The holders' part is Folio's own `folioFeeForSelf`: those shares are handed out
+                 * to backing over a ten-minute window each day at a capped rate, so buying just
+                 * before a mint to catch it gains nothing.
                  */
-                tvlFee: 0.01e18,
-                mintFee: 0.0135e18,
-                folioFeeForSelf: 0,
+                tvlFee: 0,
+                mintFee: MintSplit.MINT_FEE,
+                folioFeeForSelf: MintSplit.HOLDER_PORTION,
                 mandate: "LOCAL PROTOTYPE: direct creator admin; no enforced investment mandate"
             }),
             IFolio.FolioRegistryIndex(feeRegistry, address(0)),

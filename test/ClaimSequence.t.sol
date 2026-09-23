@@ -59,7 +59,15 @@ contract ClaimSequenceTest is MonthlyMandateFixture {
             assertEq(trackedB() + outsideB, b.totalSupply(), "asset B conservation");
             uint256 claims = index.balanceOf(address(this)) + index.balanceOf(alice)
                 + index.balanceOf(bob) + index.balanceOf(address(0xFEE));
-            assertEq(index.totalSupply(), claims + index.getPendingFeeShares(), "effective supply accounts for fee claims once");
+            /*
+             * Effective supply is every balance, plus the creator's and protocol's pending fees,
+             * plus the holders' part of mint fees that Folio has not yet handed out to backing.
+             * That last bucket shrinks on its daily schedule, so the most it can be is what is
+             * pending and the least is nothing.
+             */
+            uint256 accounted = claims + index.getPendingFeeShares();
+            assertGe(index.totalSupply(), accounted, "effective supply accounts for fee claims once");
+            assertLe(index.totalSupply() - accounted, index.folioPendingMintFeeShares(), "and nothing beyond the holders' pending part");
             assertEq(index.balanceOf(address(indexFactory)), 0);
             assertEq(a.balanceOf(address(indexFactory)), 0);
             assertEq(b.balanceOf(address(indexFactory)), 0);

@@ -79,13 +79,13 @@ contract ShareFeeHookTest is ShareMarketTest {
         assertGt(c + p + h, 0, "a swap must charge something");
 
         // The three buckets must account for every wei taken, or dust belongs to nobody.
-        assertEq(hook.FEE_BPS(), 15);
-        assertEq(c, (c + p + h) * 4_000 / 10_000, "creator 40%");
-        assertEq(p, (c + p + h) * 4_000 / 10_000, "protocol 40%");
+        assertEq(hook.FEE_BPS(), 25);
+        assertEq(c, (c + p + h) * 3_200 / 10_000, "creator 32%, 8 of 25 bps");
+        assertEq(p, (c + p + h) * 3_600 / 10_000, "protocol 36%, 9 of 25 bps");
         assertEq(h, (c + p + h) - c - p, "holders take the remainder, so nothing is stranded");
     }
 
-    function testHookFeeMatchesFifteenBasisPointsOfOutput() public {
+    function testHookFeeMatchesTwentyFiveBasisPointsOfOutput() public {
         Currency out = Currency.wrap(shareIs0 ? address(index) : address(quote));
         uint256 before_ = index.balanceOf(alice);
         feeBuy(1e18);
@@ -96,11 +96,11 @@ contract ShareFeeHookTest is ShareMarketTest {
          * The swapper keeps the output less the fee, so fee/(received+fee) is the rate.
          *
          * Compared to within one basis point rather than exactly: the fee floors once when it is
-         * computed and the ratio floors again when it is checked, so an exact 30 reads as 29.
+         * computed and the ratio floors again when it is checked, so an exact 25 reads as 24.
          * Both roundings are in the trader's favour, which is the direction they should be.
          */
-        assertApproxEqAbs(taken * 10_000 / (received + taken), uint256(15), 1,
-            "15 bps to the hook; the pool takes another 15 for its LPs, separately");
+        assertApproxEqAbs(taken * 10_000 / (received + taken), uint256(25), 1,
+            "25 bps to the hook; the pool takes another 15 for its LPs, separately");
     }
 
     function testClaimPaysCreatorAndProtocolAndNobodyElse() public {
@@ -201,9 +201,9 @@ contract ShareFeeHookTest is ShareMarketTest {
         uint256 taken = hook.creatorFees(feeKey.toId(), q) + hook.protocolFees(feeKey.toId(), q) + hook.holderFees(feeKey.toId(), q);
         assertGt(taken, 0, "an exact-output swap must pay the hook fee");
         assertEq(index.balanceOf(address(this)) >= 1e18, true, "the trader still receives exactly what they asked for");
-        // The fee is 15 bps of the input before it, so fee / (paid - fee) is the rate.
-        assertApproxEqAbs(taken * 10_000 / (paid - taken), uint256(15), 1, "15 bps, now on the input side");
-        assertEq(hook.creatorFees(feeKey.toId(), q), taken * 4_000 / 10_000, "and it splits the same way");
+        // The fee is 25 bps of the input before it, so fee / (paid - fee) is the rate.
+        assertApproxEqAbs(taken * 10_000 / (paid - taken), uint256(25), 1, "25 bps, now on the input side");
+        assertEq(hook.creatorFees(feeKey.toId(), q), taken * 3_200 / 10_000, "and it splits the same way");
     }
 
     function testUnregisteredPoolCannotBeSwapped() public {

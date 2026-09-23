@@ -74,7 +74,7 @@ contract Deploy is Script {
 
         // 1. Engine and factory.
         d.implementation = address(new Folio());
-        d.feeRegistry = address(new FixedFeeRegistry(protocol, MintSplit.PROTOCOL_PORTION_FOR_35BPS, 0));
+        d.feeRegistry = address(new FixedFeeRegistry(protocol, MintSplit.PROTOCOL_PORTION, 0));
         IndexFactory factory = new IndexFactory(d.implementation, d.feeRegistry);
         d.factory = address(factory);
 
@@ -121,6 +121,9 @@ contract Deploy is Script {
         ShareMarketRouter router = ShareMarketRouter(d.router);
         require(router.feeHook() == d.feeHook && router.launcher() == d.factory, "router identity");
         require(FixedFeeRegistry(d.feeRegistry).recipient() == protocol, "fee recipient");
+        // A nonzero floor would make Folio charge a yearly fee the index sets to zero.
+        require(FixedFeeRegistry(d.feeRegistry).feeFloor() == 0, "fee floor must be zero");
+        require(FixedFeeRegistry(d.feeRegistry).protocolPortion() == MintSplit.PROTOCOL_PORTION, "protocol portion");
     }
 
     function _record(Deployed memory d, address protocol, address[] memory quotes, address deployer) internal {

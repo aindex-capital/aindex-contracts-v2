@@ -62,7 +62,7 @@ abstract contract SeededLaunchBase is Test {
         pm = poolManagerFixture();
         assetFixture();
         factory = new IndexFactory(address(new Folio()),
-            address(new FixedFeeRegistry(protocol, MintSplit.PROTOCOL_PORTION_FOR_35BPS, 0)));
+            address(new FixedFeeRegistry(protocol, MintSplit.PROTOCOL_PORTION, 0)));
 
         // The hook names the registry as its registrar and the registry reads the hook in its
         // constructor, so the hook goes first, at a flag-bearing address, told where the
@@ -201,8 +201,8 @@ abstract contract SeededLaunchBase is Test {
         // A buy pays its fee in shares and a sell in quote: the fee is taken from the output.
         assertGt(h.creatorFees(id, shareC), 0);
         assertGt(h.creatorFees(id, quoteC), 0);
-        assertEq(h.creatorFees(id, quoteC), h.protocolFees(id, quoteC), "6 bps each");
-        assertApproxEqAbs(h.holderFees(id, quoteC) * 2, h.creatorFees(id, quoteC), 2, "3 bps to holders");
+        assertApproxEqAbs(h.creatorFees(id, quoteC) * 9, h.protocolFees(id, quoteC) * 8, 9, "8 bps creator, 9 protocol");
+        assertApproxEqAbs(h.holderFees(id, quoteC), h.creatorFees(id, quoteC), 2, "8 bps to holders, as much as the creator");
 
         uint256 creatorQuote = IERC20(quote).balanceOf(creator);
         uint256 owed = h.creatorFees(id, quoteC);

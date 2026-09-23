@@ -1,24 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/// @notice Immutable fee policy implementing Folio's registry interface; never custodies funds.
+/// @notice The split of every Folio fee: the 0.50% mint fee, and the yearly fee, which is zero.
 ///
-/// @dev    Folio computes `daoFeeShares = totalFeeShares * protocolPortion / 1e18`, so with the
-///         factory's 135 bps mint fee a `protocolPortion` of 35/135 gives the protocol exactly
-///         35 bps and the creator the other 100. `PROTOCOL_PORTION_FOR_35BPS` below is that
-///         value, named because a bare 259259259259259259 in a deploy script is unreadable and
-///         the number it has to agree with lives in another file.
+/// @dev    Folio computes `daoFeeShares = totalFeeShares * protocolPortion / 1e18`, then gives
+///         `folioFeeForSelf` of what is left to holders (those shares are never minted to anyone,
+///         so backing per share rises) and the rest to the creator. With a 50 bps mint fee:
 ///
-///         Folio additionally enforces its own 3 bps minimum mint fee even if floor is zero.
-/// @notice The split that turns the factory's 135 bps mint fee into 35 bps of protocol revenue.
-/// @dev    A library, because this number has to agree with `IndexFactoryBase.mintFee` and a
-///         deploy script has to pass it. A bare 259259259259259259 in three places is how those
-///         three drift apart.
+///             protocol   50 x 0.40         = 20 bps
+///             holders    50 x 0.60 x 0.50  = 15 bps
+///             creator    50 x 0.60 x 0.50  = 15 bps
+///
+///         A library, because these numbers have to agree with `IndexFactoryBase` and a deploy
+///         script has to pass one of them. A bare 400000000000000000 in three places is how those
+///         three drift apart. Folio additionally enforces its own 3 bps minimum protocol share.
+///
+///         The registry's floor must stay zero. Folio raises the yearly fee to the floor even when
+///         the index sets it to zero, so a nonzero floor would bring back a fee on holding.
 library MintSplit {
-    /// @notice 35/135 in D18. Use with a `mintFee` of 0.0135e18 and nothing else.
-    uint256 internal constant PROTOCOL_PORTION_FOR_35BPS = 259_259_259_259_259_259;
+    /// @notice The protocol's portion of every Folio fee, D18.
+    uint256 internal constant PROTOCOL_PORTION = 0.4e18;
+    /// @notice The holders' portion of what the protocol leaves, D18; Folio's `folioFeeForSelf`.
+    uint256 internal constant HOLDER_PORTION = 0.5e18;
+    /// @notice The mint fee, D18.
+    uint256 internal constant MINT_FEE = 0.005e18;
 }
 
+/// @notice Immutable fee policy implementing Folio's registry interface; never custodies funds.
 contract FixedFeeRegistry {
     address public immutable recipient;
     uint256 public immutable protocolPortion;

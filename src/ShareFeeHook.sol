@@ -57,8 +57,8 @@ interface IFolioLike {
 ///
 ///         ## THE THREE BUCKETS
 ///
-///         Fixed in the contract rather than settable, so "the creator takes 40%" is a property
-///         of this code and not of the values it happened to be deployed with.
+///         Fixed in the contract rather than settable, so "holders take 32%" is a property of
+///         this code and not of the values it happened to be deployed with.
 contract ShareFeeHook is IHooks, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20;
@@ -72,8 +72,13 @@ contract ShareFeeHook is IHooks, IUnlockCallback {
 
     /// @notice Taken by this hook, in basis points, **on top of the pool's own LP fee**.
     ///
-    /// @dev    The trader pays `LP_FEE_BPS + FEE_BPS`, which is 30 bps in total: 15 to whoever
-    ///         provides the depth and 15 to the people who made the thing worth trading.
+    /// @dev    The trader pays `LP_FEE_BPS + FEE_BPS`, which is 40 bps in total: 15 to whoever
+    ///         provides the depth and 25 split between the creator, the protocol and holders.
+    ///
+    ///         Trading is where holders are paid from. The index charges no yearly fee, so holding
+    ///         costs nothing and every trade adds to backing; a holder is net positive at any
+    ///         volume above zero. It was 15 bps with a 1% yearly fee, which left holders paying
+    ///         more than they received unless volume passed 33 times the index's size a year.
     ///
     ///         Charging on top of the LP fee rather than instead of it is deliberate and it is a
     ///         production pattern, not an invention: Uniswap's own hooklist carries
@@ -85,17 +90,18 @@ contract ShareFeeHook is IHooks, IUnlockCallback {
     ///         coherent only where a single locked position supplies all the liquidity there will
     ///         ever be. Here depth is meant to come from anyone, and a provider earning nothing
     ///         does not turn up.
-    uint16 public constant FEE_BPS = 15;
+    uint16 public constant FEE_BPS = 25;
 
     /// @notice What the pool itself charges, paid to liquidity providers by Uniswap.
     /// @dev    Enforced in `register` so a market cannot be created that silently pays LPs
     ///         nothing, which is the failure this constant exists to make impossible.
     uint24 public constant LP_FEE_BPS = 1_500; // 0.15% in v4's hundredths-of-a-bip units
 
-    /// @dev 40 / 40 / 20. Constants, not settings: see the note above.
-    uint16 public constant CREATOR_BPS = 4_000;
-    uint16 public constant PROTOCOL_BPS = 4_000;
-    uint16 public constant HOLDER_BPS = 2_000;
+    /// @dev 32 / 36 / 32 of 25 bps, which is 8, 9 and 8 bps of the trade. Constants, not
+    ///      settings: see the note above.
+    uint16 public constant CREATOR_BPS = 3_200;
+    uint16 public constant PROTOCOL_BPS = 3_600;
+    uint16 public constant HOLDER_BPS = 3_200;
 
     IPoolManager public immutable poolManager;
     address public immutable registrar;

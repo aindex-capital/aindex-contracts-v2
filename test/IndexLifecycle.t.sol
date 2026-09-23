@@ -94,7 +94,7 @@ contract IndexLifecycleTest is IndexFixture {
         a.mint(alice, needed[0]); b.mint(alice, needed[1]);
         vm.startPrank(alice);
         a.approve(address(index), needed[0]); b.approve(address(index), needed[1]);
-        // Read from the index: the mint fee is 135 bps now, not Folio's 3 bps minimum.
+        // Read from the index: the mint fee is 50 bps, not Folio's 3 bps minimum.
         uint256 fee = (grossShares * index.mintFee() + 1e18 - 1) / 1e18;
         index.mint(grossShares, alice, grossShares - fee);
         assertEq(index.balanceOf(alice), grossShares - fee, "upstream mint floor must be included");
@@ -114,16 +114,18 @@ contract IndexLifecycleTest is IndexFixture {
         assertEq(amounts[1], 100e6);
     }
 
-    function testManagementFeeDilutesClaimsWithoutTakingBasketAssets() public {
-        vm.warp(block.timestamp + 30 days);
+    /// @dev Holding costs nothing. A year passes and no share is minted to anybody, so every
+    ///      holder's claim on the basket is exactly what it was.
+    function testHoldingChargesNoYearlyFee() public {
+        assertEq(index.tvlFee(), 0, "no yearly fee");
+        vm.warp(block.timestamp + 365 days);
         index.poke();
-        assertGt(index.totalSupply(), 1_000e18);
-        assertEq(a.balanceOf(address(index)), 1_000e18);
-        assertEq(b.balanceOf(address(index)), 1_000e6);
-        (, uint256[] memory amounts) = index.toAssets(100e18, Math.Rounding.Floor);
-        assertLt(amounts[0], 100e18);
         index.distributeFees();
-        assertGt(index.balanceOf(address(0xFEE)), 0);
+        assertEq(index.totalSupply(), 1_000e18, "a year of holding dilutes nobody");
+        assertEq(index.balanceOf(address(0xFEE)), 0, "and pays the protocol nothing");
+        (, uint256[] memory amounts) = index.toAssets(100e18, Math.Rounding.Floor);
+        assertEq(amounts[0], 100e18);
+        assertEq(amounts[1], 100e6);
     }
 
     function testCannotInitializeTwice() public {

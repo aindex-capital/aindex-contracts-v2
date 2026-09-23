@@ -97,9 +97,9 @@ contract IndexMarketRegistry {
     function _key(address index, address quote) private view returns (PoolKey memory) {
         if (factory.creatorOf(index) == address(0) || !quoteAllowed[quote] || index == quote) revert InvalidMarket();
         /*
-         * 15 bps to liquidity providers, and `ShareFeeHook` takes another 15 on top. A trader
-         * pays 0.30% in total, split evenly between the people who supply the depth and the
-         * people who made the thing worth trading.
+         * 15 bps to liquidity providers, and `ShareFeeHook` takes another 25 on top. A trader
+         * pays 0.40% in total: 15 to the people who supply the depth, and 8 to the creator, 9 to
+         * the protocol and 8 to holders.
          *
          * Not zero. A zero pool fee pays liquidity providers nothing, and this design needs
          * outside liquidity rather than a single locked position placed once at launch.

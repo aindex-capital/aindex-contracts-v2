@@ -125,7 +125,7 @@ Send nothing else from the deploying account while it runs: the registry's addre
 | Guardian/reviewer | Cancels proposals/auctions without restoring consumed monthly capacity |
 | Two other role holders | Jointly authorize delayed replacement of the third role; cannot change portfolio rules or gain engine administration |
 | IndexMarketRegistry | Creator-selected admitted quote, registered by the creator or by the factory during that creator's launch; registration alone provides no liquidity |
-| ShareFeeHook | Takes 15 bps of each swap's output, split 40 creator / 40 protocol / 20 holders; no owner; registrar and protocol recipient immutable |
+| ShareFeeHook | Takes 25 bps of each swap's output, split 32 creator / 36 protocol / 32 holders; no owner; registrar and protocol recipient immutable |
 | ShareMarketRouter | Settles directly with PoolManager; LP ownership is namespaced by wallet and salt; only the factory may open a position on someone else's behalf, and only to add |
 | FixedFeeRegistry | Immutable fee parameters/recipient; no portfolio withdrawal authority |
 
@@ -144,22 +144,27 @@ This recovers one unavailable key, not two. Two cooperating holders can replace 
 - Weight bounds are raw token quantities per basket unit, not percentage-of-NAV loss limits. Trade caps are token amounts, not dollars. Manual planning prices require independent review. Approval freshness is not oracle freshness; colluding or mistaken authorized parties can cause losses within the limits.
 - The universe, limits and fees are fixed. Operational role addresses support the delayed recovery process above in mandate version 2. There is no arbitrary asset rescue, automatic allocation selection or unattended price approval. Guardian cancellation does not disable secondary trading or ordinary redemption.
 - An index holds 1 to 16 assets, and **any token contract can be one**. Launch refuses an address with no code and a token that does not arrive in full, which catches transfer taxes. It cannot catch a token that later pauses, blacklists the index or starts reverting, and because `redeem` transfers every asset in one loop, one such token blocks redemption of the whole basket. Which tokens are known to be sound is shown by the application as verification; it is not enforced here.
-- LPs supply both sides and bear inventory risk. A trade costs **0.30%**: 15 bps to liquidity
-  providers through the pool's own fee, and 15 bps to `ShareFeeHook`, split 40 creator / 40
-  protocol / 20 holders. The hook's 15 bps is charged on the unspecified side: the output of an
+- **Holding is free.** The index charges no yearly fee, and the fee registry's floor is zero so
+  Folio does not raise it back. Every fee is paid by someone trading or minting, and part of each
+  goes to holders, so a holder is ahead whenever the index is used.
+- LPs supply both sides and bear inventory risk. A trade costs **0.40%**: 15 bps to liquidity
+  providers through the pool's own fee, and 25 bps to `ShareFeeHook`, split 8 creator / 9
+  protocol / 8 holders. The hook's fee is charged on the unspecified side: the output of an
   exact-input swap, which the trader receives less of, or the input of an exact-output swap, which
   the trader pays more of. The holders' share is paid as **rising backing**, not a claim: Folio is
   23 bytes under the EIP-170 limit and cannot be subclassed, so a per-holder accumulator is
   impossible. `payHolders` redeems share-denominated fees into the basket, sends basket-asset fees
   straight in, and buys a quote token that is not in the basket back into shares first, with a
   caller-supplied `minSharesOut`. It is permissionless; the application offers it on each index
-  and `aindex/deploy/pay-holders.ts` runs it as a keeper. A mint costs **1.35%**, split 100 bps to
-  the creator and 35 to the protocol. There is no redeem fee: Folio has none, and `redeem` is
-  directly callable so a wrapper would be bypassable.
-- The factory's **1% annual management fee** is split between the creator and the protocol in the
-  same proportion as the mint fee: `FixedFeeRegistry` gives the protocol 35/135 of both, so about
-  **0.74% a year to the creator and 0.26% to the protocol**, paid in newly minted shares. The 1%
-  rate is candidate pricing and these are not approved commercial terms.
+  and `aindex/deploy/pay-holders.ts` runs it as a keeper, and neither offers a buyback while the
+  share trades above backing, since that would pay part of the holders' fee to the seller.
+- A mint costs **0.50%**: 20 bps to the protocol (`FixedFeeRegistry` portion 40%), 15 to holders
+  and 15 to the creator. The holders' part is Folio's own `folioFeeForSelf` at 50% of what the
+  protocol leaves: those shares go to nobody and are retired into backing over a ten-minute window
+  each day at a capped rate, so buying just before a mint gains nothing. `MintSplit` holds all
+  three numbers. There is no redeem fee: Folio has none, and `redeem` is directly callable so a
+  wrapper would be bypassable. The mint fee is also the tracking band: a share can trade about
+  0.50% plus the pool's 0.40% above backing before minting into the premium pays.
 - Fresh canonical registration still fails if the pool is already initialized. A separate `adoptExisting` operation lets only the creator accept its exact reviewed price, with an expiry no more than five minutes away. The UI requires the observed quote-per-share price to be within 1% of the entered intended price, binds review to wallet/network/index/quote/price, and never automatically adopts after initialization fails. The 1% comparison is a UI guard, not an oracle or an onchain NAV constraint. Swaps that change the reviewed price make adoption revert. This neither resets a badly priced pool nor guarantees progress against continued price manipulation; unacceptable pools must remain unregistered. Adoption leaves existing LP ownership unchanged and provides no liquidity. Funding still requires a separately reviewed, bounded transaction.
 - Indicative portfolio NAV is wired to recorded platform prices on chain 4663, with optional on-chain USD feeds. Closed-bucket source, sample age, unknown underlying source age and explicit peg assumptions are exposed. No price is required for proportional issuance/redemption or secondary swaps. Missing backing prices withhold NAV. Sampled charts remain distinct from the paginated proposal/fill/fee event ledger and do not establish historical LP returns.
 - Runtime hashes are identity checks, not audits. Local native Swap events do not prove target-chain aggregator or third-party indexer behaviour.
