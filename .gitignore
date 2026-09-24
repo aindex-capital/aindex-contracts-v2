@@ -3,3 +3,8 @@ out/
 cache/
 .DS_Store
 broadcast/*/*/dry-run/
+
+# Deployment keys. Never committed: this repository is public.
+.env
+.env.*
+!.env.example
