@@ -2,7 +2,8 @@
 
 ## Status
 
-Not audited. Never deployed. See `audits/README.md`.
+Deployed to Robinhood Chain mainnet on 2026-09-24 (addresses in `README.md` and
+`deployments/4663.json`). Not audited. See `audits/README.md`.
 
 ## Reporting
 

@@ -18,7 +18,24 @@ on two sets of addresses with two sets of compiler settings, and merging them in
 would mean recompiling deployed contracts under different optimizer settings than they were
 shipped with. Uniswap does the same thing: v2-core, v3-core and v4-core are separate repositories.
 
-**Not audited, never deployed.** See `SECURITY.md` and `audits/README.md`.
+**Deployed to Robinhood Chain mainnet on 2026-09-24, block 71125167. Not audited.** See
+`SECURITY.md` and `audits/README.md`.
+
+| Contract | Address |
+|---|---|
+| IndexFactory | `0x9d81fE1A546C83816b27fe6d006c73031CbA4b97` |
+| IndexMarketRegistry | `0xAbEe94Fad833b001410Ee43077a28FDE162aAF55` |
+| ShareMarketRouter | `0xba31DA15Edab90Ec50d3d2CE34E548eaF9b3E909` |
+| ShareFeeHook | `0xcCe92aD50Ba316011CBeCe5d8bA155655D318044` |
+| FixedFeeRegistry | `0xd578d9d7382225cb2A70D8748a906f17FC446053` |
+| Folio implementation | `0x2a5b8AD96A5fB6CC85D57Cc2b832aA712d2e06B7` |
+| MandateDeployer (created by the factory) | `0x4eadbe42caf4abed88aaf5dbb56a7fa5c65c2bb1` |
+| FolioLib (linked by Folio) | `0x24bb970Aa11AcE3c2d809591dF3dB3623C2e5CaA` |
+| RebalancingLib (linked by Folio) | `0xCDAe787aA3d652e1e134203316a930504da342e0` |
+
+Protocol fee recipient `0x230C4Df28A0065216F2BEf86122125c0F8e4A5af` (a Safe), USDG the only quote.
+No contract has an owner. `deployments/4663.json` is the record; every figure in it was read back
+from the chain after the broadcast.
 
 ## Layout
 
@@ -27,7 +44,7 @@ src/            the contracts
 test/           unit and integration, offline
 test/fork/      needs an RPC; `script/test.mjs` skips these
 script/         bootstrap and the test runner
-deployments/    what is live, per chain. Empty.
+deployments/    what is live, per chain: 4663.json, Robinhood Chain mainnet
 audits/         what has been reviewed. Empty, and says so.
 lib/            pinned dependencies, fetched by bootstrap, gitignored
 remappings.txt  import paths, as a file rather than inline in foundry.toml
@@ -111,7 +128,7 @@ forge script script/Deploy.s.sol --rpc-url https://rpc.mainnet.chain.robinhood.c
   --account <keystore> --sender <address> [--broadcast]
 ```
 
-Send nothing else from the deploying account while it runs: the registry's address is predicted from the nonce and the hook is bound to it. Afterwards the deploying account holds no role on any contract. The addresses are written to `deployments/4663.json`; from `aindex/`, `node deploy/managed-manifest.mjs` turns that into the application manifest, reading every figure from the chain and running the application's own identity check on it.
+Send nothing else from the deploying account while it runs: the registry's address is predicted from the nonce and the hook is bound to it. Afterwards the deploying account holds no role on any contract. The addresses are written to `deployments/4663.json`; from `aindex/`, `node deploy/manifest.mjs` turns that into the application manifest, reading every figure from the chain and running the application's own identity check on it.
 
 ## Authority map
 

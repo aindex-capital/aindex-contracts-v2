@@ -1,7 +1,9 @@
 # Audits
 
 **There are none.** Nothing in this repository has been audited or reviewed by anyone outside the
-project, and it has never held real money.
+project. It was deployed to Robinhood Chain mainnet on 2026-09-24 anyway, as a deliberate choice
+for a small launch, and it holds real money from then on. The contracts are immutable, so a flaw
+cannot be patched in place.
 
 This directory exists so that the absence is stated where a reader looks for the presence, rather
 than inferred from a missing folder. Reserve's own repository, which this one depends on, carries
