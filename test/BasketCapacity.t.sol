@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {TestAsset} from "./IndexLifecycle.t.sol";
 import {Test} from "forge-std/Test.sol";
 import {Folio} from "folio/Folio.sol";
@@ -83,7 +84,7 @@ contract BasketCapacityTest is Test {
         vm.warp(block.timestamp + 1 hours);
         bytes32 commitment = mandate.pending();
         vm.prank(reviewer);
-        mandate.approve(commitment, block.timestamp + 60);
+        mandate.approve(proposal, refPrices(proposal), block.timestamp + 60);
         start = gasleft();
         uint256 auction = mandate.execute(proposal);
         emit log_named_uint("16 assets execute execution gas", start - gasleft());

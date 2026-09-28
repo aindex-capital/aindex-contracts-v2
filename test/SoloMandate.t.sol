@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {IndexFixture} from "./IndexLifecycle.t.sol";
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
@@ -54,10 +55,10 @@ contract SoloMandateTest is IndexFixture {
         // Not even the approval can be given before the notice has run.
         vm.warp(block.timestamp + 23 hours);
         vm.expectRevert(MonthlyMandate.WrongState.selector);
-        m.approve(hash, block.timestamp + 60);
+        m.approve(t, refPrices(t), block.timestamp + 60);
 
         vm.warp(block.timestamp + 1 hours);
-        m.approve(hash, block.timestamp + 60);
+        m.approve(t, refPrices(t), block.timestamp + 60);
         m.execute(t);
         assertEq(soloIndex.getRebalanceNonce(), 1, "the creator ran a rebalance end to end on their own");
     }

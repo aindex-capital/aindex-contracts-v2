@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {MonthlyMandateFixture} from "./MonthlyMandate.t.sol";
 import {MonthlyMandate} from "../src/MonthlyMandate.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
@@ -94,7 +95,7 @@ contract RoleRecoveryTest is MonthlyMandateFixture {
         vm.warp(block.timestamp + 1 hours);
         bytes32 hash = mandate.pending();
         vm.prank(reviewer);
-        mandate.approve(hash, block.timestamp + 60);
+        mandate.approve(proposal(), refPrices(proposal()), block.timestamp + 60);
         vm.expectRevert(MonthlyMandate.TooEarly.selector);
         mandate.execute(proposal());
     }

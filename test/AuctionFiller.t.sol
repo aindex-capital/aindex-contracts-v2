@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IndexFixture, TestAsset} from "./IndexLifecycle.t.sol";
 import {Folio} from "folio/Folio.sol";
@@ -59,7 +60,7 @@ contract AuctionFillerTest is IndexFixture {
         vm.warp(block.timestamp + 1 hours);
         bytes32 hash = m.pending();                                  // read first: vm.prank is spent by the next call of any kind
         vm.prank(reviewer);
-        m.approve(hash, block.timestamp + 60);
+        m.approve(t, refPrices(t), block.timestamp + 60);
         auctionId = m.execute(t);
         // The auction opens after Folio's 30-second warmup and runs its length from there.
         (, uint256 start, uint256 end) = idx.auctions(auctionId);

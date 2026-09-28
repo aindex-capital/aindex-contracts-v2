@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {IndexFixture, TestAsset} from "./IndexLifecycle.t.sol";
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
@@ -66,7 +67,7 @@ contract TokenUniverseTest is IndexFixture {
         vm.warp(block.timestamp + 1 hours);
         bytes32 hash = m.pending();
         vm.prank(reviewerWallet);
-        m.approve(hash, block.timestamp + 60);
+        m.approve(t, refPrices(t), block.timestamp + 60);
         m.execute(t);
         (address[] memory basket,) = idx.totalAssets();
         bool present;

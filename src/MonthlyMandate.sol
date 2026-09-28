@@ -9,6 +9,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///         that grows only by announcement.
 /// @dev Bounds are raw-token quantities per basket unit, NOT percentage-of-NAV guarantees.
 /// The reviewer is trusted to assess current prices; this is not an autonomous oracle policy.
+///
+/// **v3: prices are set when the auction starts, not when it is queued.** A queued proposal commits to
+/// weights and to reference prices. Hours or days later, when the reviewer approves, the reviewer
+/// supplies fresh price bands, and `execute` opens the auction on those. Each fresh band must be
+/// no wider than `maxPriceSpreadBps` and stay within `MAX_REPRICE_BPS` of the queued reference, so
+/// the reviewer can follow the market but cannot invent it. The approval lasts at most five minutes,
+/// so an auction never runs on prices more than minutes old.
 /// No arbitrary calls, engine role grants, withdrawals, fee changes or upgrades are exposed.
 contract MonthlyMandate is ReentrancyGuard {
     bytes32 private constant MANAGER_ROLE = keccak256("REBALANCE_MANAGER");
@@ -57,6 +64,14 @@ contract MonthlyMandate is ReentrancyGuard {
     uint256 public roleChangeNonce;
     mapping(uint8 => RoleChange) public roleChanges;
 
+    /// @notice Read by tooling to tell a v3 mandate (fresh prices at approval) from v2, which has no such getter.
+    uint256 public constant MANDATE_VERSION = 3;
+    /// @notice How far a fresh band may sit from the queued reference: 15%, either way, per token.
+    uint256 public constant MAX_REPRICE_BPS = 1500;
+    /// The proposal the fresh prices were approved for, and the prices, in token order.
+    bytes32 public approvedHash;
+    IFolio.PriceRange[] private _approvedPrices;
+
     /**
      * Adding a token to what the index may hold.
      *
@@ -86,6 +101,7 @@ contract MonthlyMandate is ReentrancyGuard {
     event ProposalQueued(bytes32 indexed hash, uint256 indexed nonce, uint256 readyAt, uint256 expiresAt,
         IFolio.TokenRebalanceParams[] tokens);
     event ProposalApproved(bytes32 indexed hash, uint256 until);
+    event PricesApproved(bytes32 indexed hash, IFolio.PriceRange[] prices);
     event ProposalExecuted(bytes32 indexed hash, uint256 indexed auctionId, uint256 indexed rebalanceNonce);
     event Cancelled(bytes32 indexed pendingHash, uint256 activeAuctionPlusOne);
     event RoleChangeRequested(uint8 indexed role, uint256 indexed nonce, address indexed replacement,
@@ -232,41 +248,77 @@ contract MonthlyMandate is ReentrancyGuard {
         pending = proposalHash(tokens, ++proposalNonce, expiry);
         readyAt = block.timestamp + config.notice;
         expiresAt = expiry;
-        approvedUntil = 0;
+        _clearApproval();
         emit ProposalQueued(pending, proposalNonce, readyAt, expiry, tokens);
     }
 
-    /// @notice Reviewer attests to current executable price bounds shortly before execution.
-    function approve(bytes32 hash, uint256 until) external {
+    /// @notice Reviewer approves the queued proposal with fresh price bands, shortly before execution.
+    /// @param tokens The proposal exactly as queued: it is checked against the commitment.
+    /// @param prices One fresh band per token, in the proposal's order. Each is no wider than
+    ///        `maxPriceSpreadBps` and within `MAX_REPRICE_BPS` of that token's queued reference band.
+    /// @dev   Calling again before execution replaces both the prices and the window.
+    function approve(IFolio.TokenRebalanceParams[] calldata tokens, IFolio.PriceRange[] calldata prices, uint256 until)
+        external
+    {
         if (msg.sender != config.reviewer) revert Unauthorized();
-        if (hash == bytes32(0) || hash != pending || block.timestamp < readyAt) revert WrongState();
+        bytes32 hash = pending;
+        if (hash == bytes32(0) || proposalHash(tokens, proposalNonce, expiresAt) != hash || block.timestamp < readyAt) {
+            revert WrongState();
+        }
         if (until <= block.timestamp || until > block.timestamp + 5 minutes || until > expiresAt) revert InvalidProposal();
+        if (prices.length != tokens.length) revert InvalidProposal();
+        delete _approvedPrices;
+        for (uint256 i; i < prices.length; ++i) {
+            _checkFresh(prices[i], tokens[i].price);
+            _approvedPrices.push(prices[i]);
+        }
+        approvedHash = hash;
         approvedUntil = until;
         emit ProposalApproved(hash, until);
+        emit PricesApproved(hash, prices);
+    }
+
+    /// A fresh band obeys the same width rule as a queued one, and stays near the queued reference.
+    function _checkFresh(IFolio.PriceRange calldata p, IFolio.PriceRange calldata ref) private view {
+        if (p.low == 0 || p.high <= p.low || p.high > 1e45
+            || p.high - p.low > p.low * config.maxPriceSpreadBps / 10_000
+            || p.low < ref.low * (10_000 - MAX_REPRICE_BPS) / 10_000
+            || p.high > ref.high * (10_000 + MAX_REPRICE_BPS) / 10_000) revert InvalidProposal();
+    }
+
+    /// @notice The fresh bands the current approval will open the auction with; empty when none.
+    function approvedPrices() external view returns (IFolio.PriceRange[] memory) {
+        return _approvedPrices;
     }
 
     function execute(IFolio.TokenRebalanceParams[] calldata tokens) external nonReentrant returns (uint256 auctionId) {
         if (!activated || pending == bytes32(0) || proposalHash(tokens, proposalNonce, expiresAt) != pending) revert WrongState();
         if (block.timestamp < readyAt || block.timestamp < nextExecutionAt) revert TooEarly();
         if (block.timestamp > expiresAt || approvedUntil == 0 || block.timestamp > approvedUntil) revert ApprovalExpired();
+        bytes32 hash = pending;
+        // Belt and braces: every path that changes `pending` also clears the approval, so this cannot
+        // fire today. It keeps an approval bound to its proposal if a later change forgets to.
+        if (approvedHash != hash || _approvedPrices.length != tokens.length) revert ApprovalExpired();
         _checkRoles();
         _validate(tokens);
-        bytes32 hash = pending;
-        pending = bytes32(0);
-        approvedUntil = 0;
-        nextExecutionAt = block.timestamp + config.interval;
-        uint256 nonce = index.getRebalanceNonce() + 1;
-        IFolio.RebalanceLimits memory limits = IFolio.RebalanceLimits(1e18, 1e18, 1e18);
-        uint256 ttl = config.auctionLength + 31;
-        index.startRebalance(nonce, tokens, limits, ttl, ttl, block.timestamp);
+        // The auction runs on the fresh bands approved minutes ago, never on the queued reference.
+        IFolio.TokenRebalanceParams[] memory fresh = tokens;
         address[] memory assets = new address[](tokens.length);
         IFolio.WeightRange[] memory weights = new IFolio.WeightRange[](tokens.length);
         IFolio.PriceRange[] memory prices = new IFolio.PriceRange[](tokens.length);
         for (uint256 i; i < tokens.length; ++i) {
+            fresh[i].price = _approvedPrices[i];
             assets[i] = tokens[i].token;
             weights[i] = tokens[i].weight;
-            prices[i] = tokens[i].price;
+            prices[i] = _approvedPrices[i];
         }
+        _clearApproval();
+        pending = bytes32(0);
+        nextExecutionAt = block.timestamp + config.interval;
+        uint256 nonce = index.getRebalanceNonce() + 1;
+        IFolio.RebalanceLimits memory limits = IFolio.RebalanceLimits(1e18, 1e18, 1e18);
+        uint256 ttl = config.auctionLength + 31;
+        index.startRebalance(nonce, fresh, limits, ttl, ttl, block.timestamp);
         auctionId = index.openAuction(nonce, assets, weights, prices, limits, config.auctionLength);
         // Ending a rebalance blocks further auctions but leaves this auction open until its deadline.
         // Thus Folio's per-auction volume cap cannot be multiplied by opening another auction.
@@ -297,7 +349,7 @@ contract MonthlyMandate is ReentrancyGuard {
     function _cancelExecution() private {
         emit Cancelled(pending, activeAuctionPlusOne);
         pending = bytes32(0);
-        approvedUntil = 0;
+        _clearApproval();
         readyAt = 0;
         expiresAt = 0;
         if (activeAuctionPlusOne != 0) {
@@ -394,6 +446,12 @@ contract MonthlyMandate is ReentrancyGuard {
         if (pending == bytes32(0) || block.timestamp <= expiresAt) revert WrongState();
         emit Cancelled(pending, 0);
         pending = bytes32(0);
+        _clearApproval();
+    }
+
+    function _clearApproval() private {
         approvedUntil = 0;
+        approvedHash = bytes32(0);
+        delete _approvedPrices;
     }
 }

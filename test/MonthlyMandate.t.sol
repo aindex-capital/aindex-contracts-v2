@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {refPrices} from "./FreshPrices.sol";
 import {IndexFixture} from "./IndexLifecycle.t.sol";
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
@@ -45,7 +46,7 @@ abstract contract MonthlyMandateFixture is IndexFixture {
         vm.warp(block.timestamp + 1 hours);
         bytes32 hash = mandate.pending();
         vm.prank(reviewer);
-        mandate.approve(hash, block.timestamp + 60);
+        mandate.approve(t, refPrices(t), block.timestamp + 60);
     }
 
 }
@@ -90,9 +91,9 @@ contract MonthlyMandateTest is MonthlyMandateFixture {
         mandate.execute(t);
         bytes32 hash = mandate.pending();
         vm.expectRevert(MonthlyMandate.Unauthorized.selector);
-        mandate.approve(hash, block.timestamp + 60);
+        mandate.approve(t, refPrices(t), block.timestamp + 60);
         vm.prank(reviewer);
-        mandate.approve(hash, block.timestamp + 60);
+        mandate.approve(t, refPrices(t), block.timestamp + 60);
         mandate.execute(t);
         vm.expectRevert(MonthlyMandate.WrongState.selector);
         mandate.execute(t);
