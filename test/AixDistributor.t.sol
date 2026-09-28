@@ -186,6 +186,67 @@ contract AixDistributorTest is Test {
         assertEq(d.claim(carol, 20e18, pc), 20e18);
     }
 
+    function test_claimManyPaysEveryAccountAndSkipsThePaid() public {
+        fund(100e18);
+        (bytes32 r, bytes32[][] memory p) = tree(everyone(), [uint256(40e18), 30e18, 20e18, 10e18]);
+        post(r, 100e18);
+        // Bob claims on his own first; the push must not revert on him.
+        d.claim(bob, 30e18, p[1]);
+
+        address[] memory who = new address[](4);
+        uint256[] memory amt = new uint256[](4);
+        (who[0], who[1], who[2], who[3]) = (alice, bob, carol, dave);
+        (amt[0], amt[1], amt[2], amt[3]) = (40e18, 30e18, 20e18, 10e18);
+        vm.prank(poster);
+        assertEq(d.claimMany(who, amt, p), 70e18);
+        assertEq(shares.balanceOf(alice), 40e18);
+        assertEq(shares.balanceOf(bob), 30e18);
+        assertEq(shares.balanceOf(carol), 20e18);
+        assertEq(shares.balanceOf(dave), 10e18);
+        assertEq(d.claimedTotal(), 100e18);
+
+        // Run again: everyone is paid, so it pays nothing and does not revert.
+        assertEq(d.claimMany(who, amt, p), 0);
+    }
+
+    function test_claimManyRevertsOnABadProof() public {
+        fund(100e18);
+        (bytes32 r, bytes32[][] memory p) = tree(everyone(), [uint256(40e18), 30e18, 20e18, 10e18]);
+        post(r, 100e18);
+        address[] memory who = new address[](2);
+        uint256[] memory amt = new uint256[](2);
+        bytes32[][] memory proofs = new bytes32[][](2);
+        (who[0], who[1]) = (alice, bob);
+        (amt[0], amt[1]) = (40e18, 31e18);
+        (proofs[0], proofs[1]) = (p[0], p[1]);
+        vm.expectRevert(AixDistributor.InvalidProof.selector);
+        d.claimMany(who, amt, proofs);
+        assertEq(shares.balanceOf(alice), 0, "the whole batch reverts");
+
+        vm.expectRevert(AixDistributor.LengthMismatch.selector);
+        d.claimMany(who, new uint256[](1), proofs);
+    }
+
+    /// Expiry: the next root lowers an account's total to what it was paid, and its unclaimed share
+    /// goes to someone else. Nothing in the contract changes for that.
+    function test_aRootMayRecycleAnUnclaimedAmount() public {
+        fund(100e18);
+        (bytes32 r1, bytes32[][] memory p1) = tree(everyone(), [uint256(40e18), 30e18, 20e18, 10e18]);
+        post(r1, 100e18);
+        d.claim(alice, 40e18, p1[0]);
+        d.claim(bob, 30e18, p1[1]);
+        d.claim(carol, 20e18, p1[2]);
+        // Dave never claims his 10; it expires and goes to alice. Dave's total drops to what he was paid (0).
+        (bytes32 r2, bytes32[][] memory p2) = tree(everyone(), [uint256(50e18), 30e18, 20e18, 0]);
+        post(r2, 100e18);
+        vm.expectRevert(AixDistributor.NothingToClaim.selector);
+        d.claim(dave, 0, p2[3]);
+        vm.expectRevert(AixDistributor.InvalidProof.selector);
+        d.claim(dave, 10e18, p1[3]);
+        assertEq(d.claim(alice, 50e18, p2[0]), 10e18);
+        assertEq(shares.balanceOf(address(d)), 0);
+    }
+
     function test_constructorRejectsZero() public {
         vm.expectRevert(AixDistributor.ZeroAddress.selector);
         new AixDistributor(shares, address(0));

@@ -9,7 +9,12 @@ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProo
 /// @dev A cumulative Merkle distributor. Each day the poster (the payout wallet) buys shares, sends them
 /// here and posts a new root. A leaf says what an account is owed in total since the first day, so a
 /// root replaces the previous one and nothing expires when a new day is posted. `claim` pays the
-/// difference between that total and what the account has already been paid.
+/// difference between that total and what the account has already been paid, and `claimMany` does
+/// the same for a batch (the payout wallet pushes every holder's share this way).
+///
+/// Unclaimed amounts older than 90 days are recycled off chain: the next root sets that account's
+/// total back to what it has been paid plus what is still live, never below what it was paid, and the
+/// recycled shares join the next day's pot. The checks below hold either way.
 ///
 /// Leaves follow OpenZeppelin's StandardMerkleTree: keccak256(bytes.concat(keccak256(abi.encode(account,
 /// cumulative)))), with sorted pair hashing. The tree and its data file are published at `uri` so anyone
@@ -17,8 +22,8 @@ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProo
 ///
 /// Safety: a root can never allocate more than this contract has paid out plus what it holds, and
 /// claims in total can never exceed the allocation the current root declares. There is no owner and no
-/// way to take holders' tokens out other than `claim`, which always pays the account in the leaf,
-/// whoever calls it. Not independently audited.
+/// way to take holders' tokens out other than `claim` and `claimMany`, which always pay the account in
+/// the leaf, whoever calls them. Not independently audited.
 contract AixDistributor {
     using SafeERC20 for IERC20;
 
@@ -49,6 +54,7 @@ contract AixDistributor {
     error NothingToClaim();
     error ExceedsAllocation();
     error ZeroAddress();
+    error LengthMismatch();
 
     constructor(IERC20 token_, address poster_) {
         if (address(token_) == address(0) || poster_ == address(0)) revert ZeroAddress();
@@ -76,10 +82,30 @@ contract AixDistributor {
     /// @param cumulative the account's total in the current tree, since the first day.
     /// @return amount what was paid now.
     function claim(address account, uint256 cumulative, bytes32[] calldata proof) external returns (uint256 amount) {
+        amount = _claim(account, cumulative, proof);
+        if (amount == 0) revert NothingToClaim();
+    }
+
+    /// @notice Pay many accounts at once: the payout wallet pushes every holder's share after posting a
+    /// root, so holders need not act. An account already paid in full is skipped, so one holder who
+    /// claimed first cannot block the batch; a bad proof still reverts. Anyone may call.
+    /// @return paid the total paid across the batch.
+    function claimMany(address[] calldata accounts, uint256[] calldata cumulatives, bytes32[][] calldata proofs)
+        external
+        returns (uint256 paid)
+    {
+        if (accounts.length != cumulatives.length || accounts.length != proofs.length) revert LengthMismatch();
+        for (uint256 i; i < accounts.length; i++) {
+            paid += _claim(accounts[i], cumulatives[i], proofs[i]);
+        }
+    }
+
+    /// Verifies the leaf and pays the difference from what was already paid, or nothing.
+    function _claim(address account, uint256 cumulative, bytes32[] calldata proof) internal returns (uint256 amount) {
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(account, cumulative))));
         if (!MerkleProof.verifyCalldata(proof, root, leaf)) revert InvalidProof();
         uint256 already = claimed[account];
-        if (cumulative <= already) revert NothingToClaim();
+        if (cumulative <= already) return 0;
         amount = cumulative - already;
         if (claimedTotal + amount > totalAllocated) revert ExceedsAllocation();
         claimed[account] = cumulative;
