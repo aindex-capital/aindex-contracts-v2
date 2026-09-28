@@ -10,10 +10,10 @@ import {MonthlyMandate} from "../src/MonthlyMandate.sol";
 
 /// v3: the auction runs on bands the mandate builds from prices the reviewer supplies at approval.
 /// The fixture's index holds a (18 decimals, reference 1e27) and b (6 decimals, reference 1e39) with a
-/// 1% band, so the edge is 25 bps. The proposal sells a (target 0.9 per share, holds 1) for b.
+/// 1% band, so the edge is a third of it, 33 bps. The proposal sells a (target 0.9 per share, holds 1) for b.
 contract FreshPricesTest is MonthlyMandateFixture {
     uint256 constant W = 100;
-    uint256 constant EDGE = 25;
+    uint256 constant EDGE = 33;
 
     function queued() internal returns (IFolio.TokenRebalanceParams[] memory t) {
         t = proposal();

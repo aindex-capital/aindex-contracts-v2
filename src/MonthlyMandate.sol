@@ -78,8 +78,11 @@ contract MonthlyMandate is ReentrancyGuard {
     /// @notice How far the fresh prices may move relative to each other since the queue: 5%. This is
     ///         the most a reviewer can shift any pair against the index.
     uint256 public constant MAX_RELATIVE_BPS = 500;
-    /// @notice How far past the fresh price an auction may end, per side, at most. Less on narrow bands.
-    uint256 public constant EDGE_BPS = 40;
+    /// @notice How far past the fresh price an auction may end, per side, at most: 1%, so a pair ends at
+    ///         most about 2% past today's prices. Enough for a filler to cover a round trip through thin
+    ///         stock pools (measured about 1.1% on a mainnet fork); competing fillers take less. A band
+    ///         narrower than three edges gets a third of its width instead.
+    uint256 public constant EDGE_BPS = 100;
     /// The proposal the fresh prices were approved for, and the prices, in token order.
     bytes32 public approvedHash;
     IFolio.PriceRange[] private _approvedPrices;
@@ -313,7 +316,7 @@ contract MonthlyMandate is ReentrancyGuard {
     /// buy-high, so this shape starts every pair in the index's favour and ends it just past `p`.
     function _band(uint256 p, uint256 target, uint256 current) private view returns (IFolio.PriceRange memory r) {
         uint256 w = config.maxPriceSpreadBps;
-        uint256 edge = w / 4 < EDGE_BPS ? w / 4 : EDGE_BPS;
+        uint256 edge = w / 3 < EDGE_BPS ? w / 3 : EDGE_BPS;
         if (target < current) {
             r.low = p * (10_000 - edge) / 10_000;
             r.high = r.low + r.low * w / 10_000;
