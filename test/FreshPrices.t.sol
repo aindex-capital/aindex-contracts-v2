@@ -5,66 +5,109 @@ import {refPrices} from "./FreshPrices.sol";
 import {MonthlyMandateFixture} from "./MonthlyMandate.t.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MonthlyMandate} from "../src/MonthlyMandate.sol";
 
-/// v3: the auction runs on prices the reviewer supplies at approval, not on the queued reference.
-/// The fixture's index holds a (18 decimals, reference 1e27) and b (6 decimals, reference 1e39), with
-/// a 1% band. The proposal sells a for b.
+/// v3: the auction runs on bands the mandate builds from prices the reviewer supplies at approval.
+/// The fixture's index holds a (18 decimals, reference 1e27) and b (6 decimals, reference 1e39) with a
+/// 1% band, so the edge is 25 bps. The proposal sells a (target 0.9 per share, holds 1) for b.
 contract FreshPricesTest is MonthlyMandateFixture {
+    uint256 constant W = 100;
+    uint256 constant EDGE = 25;
+
     function queued() internal returns (IFolio.TokenRebalanceParams[] memory t) {
         t = proposal();
         mandate.queue(t, block.timestamp + 2 hours);
         vm.warp(block.timestamp + 1 hours);
     }
 
-    function band(uint256 low, uint256 bps) internal pure returns (IFolio.PriceRange memory) {
-        return IFolio.PriceRange(low, low + low * bps / 10_000);
+    function points(uint256 pa, uint256 pb) internal pure returns (uint256[] memory p) {
+        p = new uint256[](2);
+        p[0] = pa;
+        p[1] = pb;
     }
 
-    function approveWith(IFolio.TokenRebalanceParams[] memory t, IFolio.PriceRange[] memory p) internal {
+    function approveWith(IFolio.TokenRebalanceParams[] memory t, uint256[] memory p) internal {
         vm.prank(reviewer);
         mandate.approve(t, p, block.timestamp + 60);
     }
 
-    function testAuctionOpensOnTheFreshBands() public {
-        IFolio.TokenRebalanceParams[] memory t = queued();
-        IFolio.PriceRange[] memory p = refPrices(t);
-        p[0] = band(1.1e27, 50);
+    function sellBand(uint256 p) internal pure returns (IFolio.PriceRange memory r) {
+        r.low = p * (10_000 - EDGE) / 10_000;
+        r.high = r.low + r.low * W / 10_000;
+    }
+
+    function buyBand(uint256 p) internal pure returns (IFolio.PriceRange memory r) {
+        r.high = p * (10_000 + EDGE) / 10_000;
+        r.low = Math.mulDiv(r.high, 10_000, 10_000 + W, Math.Rounding.Ceil);
+    }
+
+    /// The price the index gets for a in b at the first biddable second, per 10 a.
+    function startPay(IFolio.TokenRebalanceParams[] memory t, uint256[] memory p) internal returns (uint256 pay) {
         approveWith(t, p);
+        uint256 id = mandate.execute(t);
+        vm.warp(block.timestamp + 31);
+        (, pay,) = index.getBid(id, IERC20(address(a)), IERC20(address(b)), 10e18);
+    }
+
+    function testAuctionOpensOnBandsBuiltFromTheFreshPrices() public {
+        IFolio.TokenRebalanceParams[] memory t = queued();
+        approveWith(t, points(1.03e27, 1e39));
         assertEq(mandate.approvedHash(), mandate.pending());
         uint256 id = mandate.execute(t);
         IFolio.PriceRange memory got = index.getAuctionPrice(id, address(a));
-        assertEq(got.low, p[0].low);
-        assertEq(got.high, p[0].high);
+        IFolio.PriceRange memory want = sellBand(1.03e27);
+        assertEq(got.low, want.low);
+        assertEq(got.high, want.high);
         got = index.getAuctionPrice(id, address(b));
-        assertEq(got.low, t[1].price.low);
-        // Spent: nothing of the approval survives the execution.
+        want = buyBand(1e39);
+        assertEq(got.low, want.low);
+        assertEq(got.high, want.high);
         assertEq(mandate.approvedHash(), bytes32(0));
         assertEq(mandate.approvedPrices().length, 0);
         assertEq(mandate.approvedUntil(), 0);
     }
 
-    /// The case that made v3: a rose 10% after the proposal was queued. On the queued prices the
-    /// first bidder would buy the index's a 10% under the market; on fresh prices it pays the market.
+    /// The case that made v3: a rose 4% after the proposal was queued. On the queued prices the first
+    /// bidder would take the move from the index; on fresh prices it pays the market.
     function testAMoveAfterQueueNoLongerGoesToTheFirstBidder() public {
         IFolio.TokenRebalanceParams[] memory t = queued();
         uint256 snap = vm.snapshotState();
-
-        approveWith(t, refPrices(t));
-        uint256 id = mandate.execute(t);
-        vm.warp(block.timestamp + 31);
-        (, uint256 stalePay,) = index.getBid(id, IERC20(address(a)), IERC20(address(b)), 10e18);
-
+        uint256 stalePay = startPay(t, refPrices(t));
         vm.revertToState(snap);
-        IFolio.PriceRange[] memory p = refPrices(t);
-        p[0] = band(1.1e27, 10);
-        approveWith(t, p);
-        id = mandate.execute(t);
-        vm.warp(block.timestamp + 31);
-        (, uint256 freshPay,) = index.getBid(id, IERC20(address(a)), IERC20(address(b)), 10e18);
+        uint256 freshPay = startPay(t, points(1.04e27, 1e39));
+        assertGe(freshPay * 10_000, stalePay * 10_390);
+    }
 
-        // The bidder now pays about 10% more b for the same a.
-        assertGe(freshPay * 10_000, stalePay * 10_900);
+    /// The review's attack: sell token down 15%, buy token up 15%. Refused. The most a rogue reviewer
+    /// can now move a pair is 5%, and the auction still starts no worse than that for the index.
+    function testARogueReviewerCanMoveAPairAtMostFivePercent() public {
+        IFolio.TokenRebalanceParams[] memory t = queued();
+        vm.prank(reviewer);
+        vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
+        mandate.approve(t, points(0.85e27, 1.15e39), block.timestamp + 60);
+        vm.prank(reviewer);
+        vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
+        mandate.approve(t, points(0.97e27, 1.03e39), block.timestamp + 60);
+
+        uint256 snap = vm.snapshotState();
+        uint256 honest = startPay(t, refPrices(t));
+        vm.revertToState(snap);
+        uint256 rogue = startPay(t, points(0.9525e27, 1e39));
+        assertGe(rogue * 10_000, honest * 9_500);
+    }
+
+    function testEveryPriceMovingTogetherIsAllowedUpToFifteenPercent() public {
+        IFolio.TokenRebalanceParams[] memory t = queued();
+        approveWith(t, points(1.1e27, 1.1e39));
+        mandate.execute(t);
+        t = proposal();
+        vm.warp(block.timestamp + 30 days);
+        mandate.queue(t, block.timestamp + 2 hours);
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(reviewer);
+        vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
+        mandate.approve(t, points(1.16e27, 1.16e39), block.timestamp + 60);
     }
 
     function testApproveRefusesAnythingButTheQueuedProposalFromTheReviewer() public {
@@ -84,49 +127,27 @@ contract FreshPricesTest is MonthlyMandateFixture {
         vm.expectRevert(MonthlyMandate.WrongState.selector);
         mandate.approve(other, refPrices(other), block.timestamp + 60);
 
-        IFolio.PriceRange[] memory short_ = new IFolio.PriceRange[](1);
-        short_[0] = t[0].price;
+        uint256[] memory one = new uint256[](1);
+        one[0] = 1e27;
         vm.prank(reviewer);
         vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
-        mandate.approve(t, short_, block.timestamp + 60);
+        mandate.approve(t, one, block.timestamp + 60);
+
+        vm.prank(reviewer);
+        vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
+        mandate.approve(t, points(0, 1e39), block.timestamp + 60);
 
         vm.prank(reviewer);
         vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
         mandate.approve(t, refPrices(t), block.timestamp + 5 minutes + 1);
     }
 
-    function testFreshBandsObeyWidthAndStayNearTheReference() public {
-        IFolio.TokenRebalanceParams[] memory t = queued();
-        IFolio.PriceRange[][] memory bad = new IFolio.PriceRange[][](6);
-        for (uint256 i; i < bad.length; ++i) bad[i] = refPrices(t);
-        bad[0][0] = band(1e27, 101);                          // wider than the 1% band
-        bad[1][0] = IFolio.PriceRange(0.849e27, 0.85e27);     // more than 15% under the reference low
-        bad[2][0] = IFolio.PriceRange(1.15e27, 1.1512e27);    // more than 15% over the reference high
-        bad[3][0] = IFolio.PriceRange(0, 1);                  // zero
-        bad[4][0] = IFolio.PriceRange(1e27, 1e27);            // empty band
-        bad[5][1] = IFolio.PriceRange(0.8e39, 0.801e39);      // the second token too
-        for (uint256 i; i < bad.length; ++i) {
-            vm.prank(reviewer);
-            vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
-            mandate.approve(t, bad[i], block.timestamp + 60);
-        }
-        // The edges themselves are allowed.
-        IFolio.PriceRange[] memory edge = refPrices(t);
-        edge[0] = IFolio.PriceRange(0.85e27, 0.85e27 + 0.85e27 / 100);
-        edge[1] = IFolio.PriceRange(1.14e39, 1.15115e39);
-        approveWith(t, edge);
-        mandate.execute(t);
-    }
-
     function testReapprovalReplacesThePrices() public {
         IFolio.TokenRebalanceParams[] memory t = queued();
-        IFolio.PriceRange[] memory p = refPrices(t);
-        p[0] = band(1.05e27, 50);
-        approveWith(t, p);
-        p[0] = band(0.95e27, 50);
-        approveWith(t, p);
+        approveWith(t, points(1.02e27, 1e39));
+        approveWith(t, points(0.98e27, 1e39));
         uint256 id = mandate.execute(t);
-        assertEq(index.getAuctionPrice(id, address(a)).low, 0.95e27);
+        assertEq(index.getAuctionPrice(id, address(a)).low, sellBand(0.98e27).low);
     }
 
     function testExecuteNeedsACurrentApproval() public {
@@ -162,27 +183,30 @@ contract FreshPricesTest is MonthlyMandateFixture {
         assertEq(mandate.approvedPrices().length, 0);
     }
 
-    function testFuzzAnyBandInsideTheRulesOpensOnExactlyThosePrices(uint256 low, uint256 bps) public {
+    /// For any prices the rules allow, the auction starts no worse than today's pair price for the
+    /// index and ends no more than two edges past it.
+    function testFuzzAnyAllowedPricesStartInTheIndexsFavourAndEndJustPastIt(uint256 pa, uint256 rel) public {
         IFolio.TokenRebalanceParams[] memory t = queued();
-        bps = bound(bps, 1, 100);
-        uint256 maxHigh = t[0].price.high * 11_500 / 10_000;
-        low = bound(low, 0.85e27, maxHigh * 10_000 / (10_000 + bps));
-        IFolio.PriceRange[] memory p = refPrices(t);
-        p[0] = band(low, bps);
-        approveWith(t, p);
+        pa = bound(pa, 0.9e27, 1.1e27);
+        rel = bound(rel, 9_600, 10_400);
+        uint256 pb = 1e39 * pa / 1e27 * rel / 10_000;
+        approveWith(t, points(pa, pb));
         uint256 id = mandate.execute(t);
-        IFolio.PriceRange memory got = index.getAuctionPrice(id, address(a));
-        assertEq(got.low, p[0].low);
-        assertEq(got.high, p[0].high);
+        IFolio.PriceRange memory sa = index.getAuctionPrice(id, address(a));
+        IFolio.PriceRange memory sb = index.getAuctionPrice(id, address(b));
+        uint256 fair = Math.mulDiv(pa, 1e27, pb);
+        uint256 start = Math.mulDiv(sa.high, 1e27, sb.low);
+        uint256 end = Math.mulDiv(sa.low, 1e27, sb.high, Math.Rounding.Ceil);
+        assertGe(start, fair);
+        assertGe(end * 10_000, fair * (10_000 - 2 * EDGE - 1));
+        assertLe(end, fair);
     }
 
-    function testFuzzAnyBandOutsideTheGuardIsRefused(uint256 low) public {
+    function testFuzzPricesThatMoveApartMoreThanFivePercentAreRefused(uint256 rel) public {
         IFolio.TokenRebalanceParams[] memory t = queued();
-        low = bound(low, 1, 0.85e27 - 1);
-        IFolio.PriceRange[] memory p = refPrices(t);
-        p[0] = band(low, 50);
+        rel = bound(rel, 10_501, 11_400);
         vm.prank(reviewer);
         vm.expectRevert(MonthlyMandate.InvalidProposal.selector);
-        mandate.approve(t, p, block.timestamp + 60);
+        mandate.approve(t, points(1e27, 1e39 * rel / 10_000), block.timestamp + 60);
     }
 }

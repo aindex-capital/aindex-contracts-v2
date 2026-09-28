@@ -130,6 +130,8 @@ contract Deploy is Script {
         string memory k = "deployment";
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeUint(k, "startBlock", d.startBlock);
+        // The mandate every index from this factory gets: 3 opens auctions on prices set at approval.
+        vm.serializeUint(k, "mandateVersion", 3);
         vm.serializeAddress(k, "deployer", deployer);
         vm.serializeAddress(k, "protocolRecipient", protocol);
         vm.serializeAddress(k, "poolManager", POOL_MANAGER);

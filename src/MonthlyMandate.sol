@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {Folio} from "folio/Folio.sol";
 import {IFolio} from "folio/interfaces/IFolio.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @notice Manual mandate with notice, price approval and one auction per cycle, over a token universe
 ///         that grows only by announcement.
@@ -11,11 +12,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// The reviewer is trusted to assess current prices; this is not an autonomous oracle policy.
 ///
 /// **v3: prices are set when the auction starts, not when it is queued.** A queued proposal commits to
-/// weights and to reference prices. Hours or days later, when the reviewer approves, the reviewer
-/// supplies fresh price bands, and `execute` opens the auction on those. Each fresh band must be
-/// no wider than `maxPriceSpreadBps` and stay within `MAX_REPRICE_BPS` of the queued reference, so
-/// the reviewer can follow the market but cannot invent it. The approval lasts at most five minutes,
-/// so an auction never runs on prices more than minutes old.
+/// weights and to a reference price per token (its band's `low`, the planning price). Hours or days
+/// later the reviewer approves with one fresh price per token, and this contract builds the auction's
+/// bands from them, in the shape that protects the index: a token the index sells gets its band from
+/// just under the fresh price upward, a token it buys from just over it downward, so every pair
+/// starts in the index's favour and ends at most about `2 * EDGE_BPS` past the fresh prices.
+///
+/// What a reviewer can do with prices is bounded. Only relative moves between tokens can cost the
+/// index anything (moving every price together changes no pair), so the fresh prices may move
+/// against their references by at most `MAX_RELATIVE_BPS` relative to each other, and no one price
+/// by more than `MAX_REPRICE_BPS`. A market that moved further since the queue needs a new proposal.
+/// The approval lasts at most five minutes, so an auction never runs on prices more than minutes old.
 /// No arbitrary calls, engine role grants, withdrawals, fee changes or upgrades are exposed.
 contract MonthlyMandate is ReentrancyGuard {
     bytes32 private constant MANAGER_ROLE = keccak256("REBALANCE_MANAGER");
@@ -66,8 +73,13 @@ contract MonthlyMandate is ReentrancyGuard {
 
     /// @notice Read by tooling to tell a v3 mandate (fresh prices at approval) from v2, which has no such getter.
     uint256 public constant MANDATE_VERSION = 3;
-    /// @notice How far a fresh band may sit from the queued reference: 15%, either way, per token.
+    /// @notice How far one fresh price may sit from its queued reference: 15%, either way.
     uint256 public constant MAX_REPRICE_BPS = 1500;
+    /// @notice How far the fresh prices may move relative to each other since the queue: 5%. This is
+    ///         the most a reviewer can shift any pair against the index.
+    uint256 public constant MAX_RELATIVE_BPS = 500;
+    /// @notice How far past the fresh price an auction may end, per side, at most. Less on narrow bands.
+    uint256 public constant EDGE_BPS = 40;
     /// The proposal the fresh prices were approved for, and the prices, in token order.
     bytes32 public approvedHash;
     IFolio.PriceRange[] private _approvedPrices;
@@ -252,14 +264,12 @@ contract MonthlyMandate is ReentrancyGuard {
         emit ProposalQueued(pending, proposalNonce, readyAt, expiry, tokens);
     }
 
-    /// @notice Reviewer approves the queued proposal with fresh price bands, shortly before execution.
+    /// @notice Reviewer approves the queued proposal with fresh prices, shortly before execution.
     /// @param tokens The proposal exactly as queued: it is checked against the commitment.
-    /// @param prices One fresh band per token, in the proposal's order. Each is no wider than
-    ///        `maxPriceSpreadBps` and within `MAX_REPRICE_BPS` of that token's queued reference band.
+    /// @param prices One fresh price per token, D27 USD per raw unit as Folio prices, in the proposal's
+    ///        order. The auction's bands are built from these here, not supplied.
     /// @dev   Calling again before execution replaces both the prices and the window.
-    function approve(IFolio.TokenRebalanceParams[] calldata tokens, IFolio.PriceRange[] calldata prices, uint256 until)
-        external
-    {
+    function approve(IFolio.TokenRebalanceParams[] calldata tokens, uint256[] calldata prices, uint256 until) external {
         if (msg.sender != config.reviewer) revert Unauthorized();
         bytes32 hash = pending;
         if (hash == bytes32(0) || proposalHash(tokens, proposalNonce, expiresAt) != hash || block.timestamp < readyAt) {
@@ -267,23 +277,54 @@ contract MonthlyMandate is ReentrancyGuard {
         }
         if (until <= block.timestamp || until > block.timestamp + 5 minutes || until > expiresAt) revert InvalidProposal();
         if (prices.length != tokens.length) revert InvalidProposal();
+        _checkRelative(tokens, prices);
+        (address[] memory held, uint256[] memory perShare) = index.toAssets(1e18, Math.Rounding.Floor);
         delete _approvedPrices;
         for (uint256 i; i < prices.length; ++i) {
-            _checkFresh(prices[i], tokens[i].price);
-            _approvedPrices.push(prices[i]);
+            uint256 current;
+            for (uint256 j; j < held.length; ++j) if (held[j] == tokens[i].token) current = perShare[j] * 1e9;
+            _approvedPrices.push(_band(prices[i], tokens[i].weight.spot, current));
         }
         approvedHash = hash;
         approvedUntil = until;
         emit ProposalApproved(hash, until);
-        emit PricesApproved(hash, prices);
+        emit PricesApproved(hash, _approvedPrices);
     }
 
-    /// A fresh band obeys the same width rule as a queued one, and stays near the queued reference.
-    function _checkFresh(IFolio.PriceRange calldata p, IFolio.PriceRange calldata ref) private view {
-        if (p.low == 0 || p.high <= p.low || p.high > 1e45
-            || p.high - p.low > p.low * config.maxPriceSpreadBps / 10_000
-            || p.low < ref.low * (10_000 - MAX_REPRICE_BPS) / 10_000
-            || p.high > ref.high * (10_000 + MAX_REPRICE_BPS) / 10_000) revert InvalidProposal();
+    /// Each fresh price within `MAX_REPRICE_BPS` of its reference, and all of them within
+    /// `MAX_RELATIVE_BPS` of each other, measured as moves from their references.
+    function _checkRelative(IFolio.TokenRebalanceParams[] calldata tokens, uint256[] calldata prices) private pure {
+        uint256 lo = type(uint256).max;
+        uint256 hi;
+        for (uint256 i; i < prices.length; ++i) {
+            uint256 ref = tokens[i].price.low;
+            uint256 p = prices[i];
+            if (p == 0 || p > 1e45 || p * 10_000 < ref * (10_000 - MAX_REPRICE_BPS)
+                || p * 10_000 > ref * (10_000 + MAX_REPRICE_BPS)) revert InvalidProposal();
+            uint256 move = p * 1e18 / ref;
+            if (move < lo) lo = move;
+            if (move > hi) hi = move;
+        }
+        if (hi * 10_000 > lo * (10_000 + MAX_RELATIVE_BPS)) revert InvalidProposal();
+    }
+
+    /// The auction band for one token: the index sells it if its target is below what a share holds
+    /// now, buys it if above. Folio runs a pair from sell-high over buy-low down to sell-low over
+    /// buy-high, so this shape starts every pair in the index's favour and ends it just past `p`.
+    function _band(uint256 p, uint256 target, uint256 current) private view returns (IFolio.PriceRange memory r) {
+        uint256 w = config.maxPriceSpreadBps;
+        uint256 edge = w / 4 < EDGE_BPS ? w / 4 : EDGE_BPS;
+        if (target < current) {
+            r.low = p * (10_000 - edge) / 10_000;
+            r.high = r.low + r.low * w / 10_000;
+        } else if (target > current) {
+            r.high = p * (10_000 + edge) / 10_000;
+            r.low = Math.mulDiv(r.high, 10_000, 10_000 + w, Math.Rounding.Ceil);
+        } else {
+            r.low = p * (20_000 - w) / 20_000;
+            r.high = r.low + r.low * w / 10_000;
+        }
+        if (r.low == 0 || r.high <= r.low || r.high > 1e45) revert InvalidProposal();
     }
 
     /// @notice The fresh bands the current approval will open the auction with; empty when none.
