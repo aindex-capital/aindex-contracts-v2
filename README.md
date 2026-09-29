@@ -130,6 +130,82 @@ forge script script/Deploy.s.sol --rpc-url https://rpc.mainnet.chain.robinhood.c
 
 Send nothing else from the deploying account while it runs: the registry's address is predicted from the nonce and the hook is bound to it. Afterwards the deploying account holds no role on any contract. The addresses are written to `deployments/4663.json`; from `aindex/`, `node deploy/manifest.mjs` turns that into the application manifest, reading every figure from the chain and running the application's own identity check on it.
 
+## Liquidity locker
+
+`src/LiquidityLocker.sol` holds the official wallet's liquidity in each index's share market until
+a date, and can move it to backing without letting it leave. It is a new contract beside v3 and
+changes nothing deployed. Positions are the locker's own in the PoolManager (salt 0), not router
+positions, so `ShareMarketRouter`'s `LiquidityChanged` ledger does not see them.
+
+- **The lock.** `unlockAt` is set at deploy and can only move later (`extendLock`, or
+  `extendIndexLock` for one index). Before it, nothing leaves: no function sends tokens anywhere but
+  the PoolManager. After it, `withdraw(index)` sends that index's position and float to the owner.
+- **`deposit` and `topUp`** are the owner's. The first deposit sets the range; the rest of what does
+  not fit stays as that index's float, counted per index so one market never spends another's USDG.
+- **`recenter`** removes the position, swaps to the target with the target as the price limit (free
+  when the locker is the only liquidity), and adds everything that fits in the new range, in one
+  transaction. It reverts unless the pool ends within `toleranceBps` (at most 1%) of the target, the
+  new liquidity is at least `minLiquidity`, the range holds the target, and the index's holdings
+  valued at the target fell by at most `maxLossBps`.
+- **Who may recenter.** The owner, up to `ownerMaxMoveBps` from the pool's price per call, and an
+  optional operator (`setOperator`, zero to revoke) up to `operatorMaxMoveBps` per call and once per
+  `operatorCooldown`. All four limits are immutable. A wrong target inside the cap is the one thing
+  the checks cannot catch: arbitrage then takes from the position, so keep the operator's cap small.
+
+The commands below deploy it with owner 1,500 bps, operator 300 bps every 4 hours and a 50 bps loss floor. Tests:
+`test/LiquidityLocker.t.sol` (19, one fuzz) and, on a fork,
+`test/fork/LiquidityLockerFork.t.sol`:
+
+```sh
+anvil --fork-url https://rpc.ordofi.network --port 8571
+AINDEX_FORK_RPC=http://127.0.0.1:8571 \
+AINDEX_AR10_NAV_USD18=$(curl -s https://aindex.capital/v2/indexes/0xf922df1f829dc4144d17d1af152d14ede549bb86 | jq -r .valuation.navPerShareUsd18) \
+  forge test --match-contract LiquidityLockerForkTest -vv
+```
+
+### Going live (the official wallet runs these)
+
+1. Deploy, from `aindex-contracts-v2/`. `UNLOCK` is the lock date as a Unix time; it can be
+   extended later but never shortened.
+
+```sh
+set -a; . ./.env; set +a                      # DEPLOYER_PRIVATE_KEY, the official wallet 0x9168..492C
+UNLOCK=$(date -v+1y +%s)                      # one year from now
+forge create src/LiquidityLocker.sol:LiquidityLocker --rpc-url https://rpc.mainnet.chain.robinhood.com \
+  --private-key "$DEPLOYER_PRIVATE_KEY" --broadcast --constructor-args \
+  0x8366a39cc670b4001a1121b8f6a443a643e40951 0x2F8015CA784f7eEEb0AbcF854c92A363D58E9f7e \
+  0x916817f2c44c44f0255249140300e78afd6c492c "$UNLOCK" 1500 300 14400 50
+```
+
+2. Move AR10, ADIV and AIXSTR's official positions in, then recenter at backing, from `aindex/`.
+   Both are dry runs until `--send`; a rerun skips what is already moved or already at backing.
+
+```sh
+export AINDEX_LP_LOCKER=<locker address> AINDEX_LOCKER_KEY=$DEPLOYER_PRIVATE_KEY
+npx tsx deploy/lp-locker.ts migrate            # then again with --send
+npx tsx deploy/lp-locker.ts recenter           # then again with --send; AR10 moves about 5% as the owner
+```
+
+3. Optionally, an operator for the cron: a new wallet with a little ETH, which can only recenter.
+
+```sh
+cast send <locker address> "setOperator(address)" <operator address> \
+  --rpc-url https://rpc.mainnet.chain.robinhood.com --private-key "$DEPLOYER_PRIVATE_KEY"
+```
+
+4. The cron, every 30 minutes, with `.local/locker.env` holding `AINDEX_LP_LOCKER` and the
+   operator's key as `AINDEX_LOCKER_KEY`. It recenters any pool more than 100 bps off backing,
+   300 bps at a time.
+
+```
+*/30 * * * * cd /path/to/aindex && set -a && . .local/locker.env && set +a && npx tsx deploy/lp-locker.ts recenter --send >> .local/lp-locker.log 2>&1
+```
+
+`--band 200` recenters into a band 2% either side of backing instead of the position's own range:
+about 80 times the depth near backing with the same tokens, and none past the band. Rehearse any of
+this on a fork with `--fork http://127.0.0.1:8571` (and `--as <address>` to act as the operator).
+After the unlock date: `cast send <locker> "withdraw(address)" <index>` from the official wallet.
+
 ## Authority map
 
 | Component | Authority / funds |
