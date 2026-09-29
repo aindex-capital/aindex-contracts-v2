@@ -169,7 +169,7 @@ nothing. Fee rates, splits and recipients are constants or immutables.
 ## Deployment: Robinhood Chain mainnet (v3)
 
 Chain id 4663. Deployed at block 74953548. Record: [`deployments/4663-v3.json`](deployments/4663-v3.json);
-transactions: `broadcast/Deploy.s.sol/4663/`; deploy script: `script/deploy-v3.sh`.
+deploy script: `script/deploy-v3.sh`; every deployment transaction can be read on Blockscout from the addresses below.
 
 | Contract | Address |
 | --- | --- |
@@ -252,7 +252,6 @@ src/            contracts
 test/           unit tests; test/fork/ for mainnet fork tests
 script/         Deploy.s.sol, deploy-v3.sh, bootstrap.mjs, test.mjs, mine-hook-salt.py
 deployments/    deployed addresses per chain
-broadcast/      Foundry broadcast logs of the mainnet deployments
 verify/v3/      verification inputs and prove.py
 audits/         audit reports (none yet)
 ```

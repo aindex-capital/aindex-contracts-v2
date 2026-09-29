@@ -4,7 +4,7 @@ One file per chain and version, recording what is live and where its verificatio
 
 **`4663-v3.json` is the live deployment on Robinhood Chain mainnet (chain id 4663), deployed
 2026-09-28 at block 74953548** from `0x916817f2c44c44f0255249140300E78AfD6c492C` by
-`script/deploy-v3.sh`. The transactions are in `broadcast/Deploy.s.sol/4663/`. Standard JSON
+`script/deploy-v3.sh`; its transactions can be read on Blockscout from the recorded addresses. Standard JSON
 verification inputs, with a script that proves each compiles to the on-chain code, are in
 `verify/v3/`.
 
