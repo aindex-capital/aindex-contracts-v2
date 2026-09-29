@@ -11,7 +11,8 @@ import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.sol";
-import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
+import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
+import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @notice Stands in for `IndexMarketRegistry.marketFor`, the only call the locker makes to it.
@@ -43,6 +44,7 @@ contract LiquidityLockerTest is IndexFixture {
     address internal operatorKey = address(0x0B0);
     uint64 internal unlockAt;
     PoolModifyLiquidityTest internal lp;
+    PoolSwapTest internal swapper;
 
     function setUp() public virtual override {
         super.setUp();
@@ -66,6 +68,7 @@ contract LiquidityLockerTest is IndexFixture {
         usd.approve(address(locker), type(uint256).max);
         vm.stopPrank();
         lp = new PoolModifyLiquidityTest(pm);
+        swapper = new PoolSwapTest(pm);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -100,7 +103,7 @@ contract LiquidityLockerTest is IndexFixture {
     function deposit(uint256 shares, uint256 quote, int24 lower, int24 upper) internal returns (uint128) {
         (uint256 a0, uint256 a1) = shareIs0 ? (shares, quote) : (quote, shares);
         vm.prank(owner);
-        return locker.deposit(address(index), a0, a1, lower, upper, 0, block.timestamp);
+        return locker.deposit(address(index), a0, a1, lower, upper, 0, 0, block.timestamp);
     }
 
     function params(uint256 usd18, int24 lower, int24 upper) internal view returns (LiquidityLocker.Recenter memory r) {
@@ -111,6 +114,8 @@ contract LiquidityLockerTest is IndexFixture {
         r.toleranceBps = 10;
         r.maxSwapIn = type(uint128).max;
         r.minLiquidity = 0;
+        r.backstopBps = 0;
+        r.minBackstopLiquidity = 0;
         r.deadline = block.timestamp;
     }
 
@@ -153,12 +158,12 @@ contract LiquidityLockerTest is IndexFixture {
 
     function testDepositIsOwnerOnlyAndKeepsItsRange() public {
         vm.expectRevert(LiquidityLocker.NotOwner.selector);
-        locker.deposit(address(index), 1, 1, FULL_LOWER, FULL_UPPER, 0, block.timestamp);
+        locker.deposit(address(index), 1, 1, FULL_LOWER, FULL_UPPER, 0, 0, block.timestamp);
         deposit(2.5e18, 25.2e6, FULL_LOWER, FULL_UPPER);
         (uint256 a0, uint256 a1) = shareIs0 ? (uint256(1e18), uint256(10e6)) : (uint256(10e6), uint256(1e18));
         vm.prank(owner);
         vm.expectRevert(LiquidityLocker.RangeMismatch.selector);
-        locker.deposit(address(index), a0, a1, -600, 600, 0, block.timestamp);
+        locker.deposit(address(index), a0, a1, -600, 600, 0, 0, block.timestamp);
     }
 
     function testUnknownMarketRefused() public {
@@ -227,7 +232,7 @@ contract LiquidityLockerTest is IndexFixture {
         index.approve(address(strict), type(uint256).max);
         usd.approve(address(strict), type(uint256).max);
         (uint256 a0, uint256 a1) = shareIs0 ? (uint256(2.5e18), uint256(25.2e6)) : (uint256(25.2e6), uint256(2.5e18));
-        strict.deposit(address(index), a0, a1, FULL_LOWER, FULL_UPPER, 0, block.timestamp);
+        strict.deposit(address(index), a0, a1, FULL_LOWER, FULL_UPPER, 0, 0, block.timestamp);
         LiquidityLocker.Recenter memory r = params(10.11e18, FULL_LOWER, FULL_UPPER);
         vm.expectPartialRevert(LiquidityLocker.ValueBelowFloor.selector);
         strict.recenter(r);
@@ -305,7 +310,7 @@ contract LiquidityLockerTest is IndexFixture {
 
         // Nothing else is open to it.
         vm.expectRevert(LiquidityLocker.NotOwner.selector);
-        locker.deposit(address(index), 1, 1, FULL_LOWER, FULL_UPPER, 0, block.timestamp);
+        locker.deposit(address(index), 1, 1, FULL_LOWER, FULL_UPPER, 0, 0, block.timestamp);
         vm.expectRevert(LiquidityLocker.NotOwner.selector);
         locker.topUp(address(index), 1, 1);
         vm.expectRevert(LiquidityLocker.NotOwner.selector);
@@ -346,7 +351,7 @@ contract LiquidityLockerTest is IndexFixture {
         vm.prank(owner);
         // A range on the far side of the price holds only shares.
         (int24 lower, int24 upper) = shareIs0 ? (int24(-120), FULL_UPPER) : (FULL_LOWER, int24(120));
-        locker.deposit(address(index), a0, a1, lower, upper, 0, block.timestamp);
+        locker.deposit(address(index), a0, a1, lower, upper, 0, 0, block.timestamp);
         uint256 quoteBefore = usd.balanceOf(address(locker));
         // Moving up needs quote in, and this index has almost none: the swap stops short.
         LiquidityLocker.Recenter memory r = params(10.5e18, FULL_LOWER, FULL_UPPER);
@@ -414,9 +419,7 @@ contract LiquidityLockerTest is IndexFixture {
         locker.withdraw(address(index));
     }
 
-    function testConstructorRefusesAPastUnlockOrALooserOperator() public {
-        vm.expectRevert(LiquidityLocker.InvalidConfig.selector);
-        new LiquidityLocker(pm, markets, owner, uint64(block.timestamp), OWNER_MOVE, OPERATOR_MOVE, COOLDOWN, MAX_LOSS);
+    function testConstructorRefusesALooserOperator() public {
         vm.expectRevert(LiquidityLocker.InvalidConfig.selector);
         new LiquidityLocker(pm, markets, owner, unlockAt, 300, 301, COOLDOWN, MAX_LOSS);
     }
@@ -427,5 +430,118 @@ contract LiquidityLockerTest is IndexFixture {
         vm.prank(address(pm));
         vm.expectRevert(LiquidityLocker.UnauthorizedCallback.selector);
         locker.unlockCallback("");
+    }
+
+    // ------------------------------------------------------------------ band and backstop
+
+    /// @dev Buys shares with `quoteIn` of the quote through the pool, as any trader would.
+    function buyShares(uint256 quoteIn) internal {
+        usd.mint(address(this), quoteIn);
+        usd.approve(address(swapper), quoteIn);
+        bool zeroForOne = !shareIs0;
+        swapper.swap(key, SwapParams(zeroForOne, -int256(quoteIn), zeroForOne ? TickMath.MIN_SQRT_PRICE + 1
+            : TickMath.MAX_SQRT_PRICE - 1), PoolSwapTest.TestSettings(false, false), "");
+    }
+
+    function bandAndBackstop(uint16 backstopBps) internal returns (uint128 band, uint128 backstop) {
+        deposit(2.5e18, 25.2e6, FULL_LOWER, FULL_UPPER);
+        (int24 lower, int24 upper) = around(9.41e18, 200);
+        LiquidityLocker.Recenter memory r = params(9.41e18, lower, upper);
+        r.backstopBps = backstopBps;
+        vm.prank(owner);
+        band = locker.recenter(r);
+        backstop = locker.backstopLiquidity(address(index));
+    }
+
+    function testRecenterPlacesABandAndAFullRangeBackstop() public {
+        uint256 before = value(9.41e18);
+        (uint128 band, uint128 backstop) = bandAndBackstop(1_000);
+        assertGt(band, 0);
+        assertGt(backstop, 0);
+        (uint128 atFull,,) = pm.getPositionInfo(key.toId(), address(locker), FULL_LOWER, FULL_UPPER, bytes32(uint256(1)));
+        assertEq(atFull, backstop, "the backstop is the locker's own full-range position, salt 1");
+        assertApproxEqRel(poolUsd(key, address(index)), 9.41e18, 1e14);
+        assertGe(value(9.41e18) + 2, before, "nothing spent");
+        // About a tenth of the tokens are in the backstop: at full range its liquidity is roughly a
+        // tenth of what all of them would have made there.
+        assertApproxEqRel(uint256(backstop) * 10, 7.7e12, 0.05e18);
+    }
+
+    function testBackstopKeepsPricePastTheBandBounded() public {
+        uint256 snap = vm.snapshotState();
+        bandAndBackstop(0);
+        buyShares(50e6);
+        uint256 bare = poolUsd(key, address(index));
+        vm.revertToState(snap);
+        bandAndBackstop(1_000);
+        buyShares(50e6);
+        uint256 backed = poolUsd(key, address(index));
+        emit log_named_decimal_uint("after a $50 buy, band only, $", bare, 18);
+        emit log_named_decimal_uint("after a $50 buy, band and 10% backstop, $", backed, 18);
+        assertGt(bare, 1_000e18, "with nothing past the band, the price runs away");
+        assertLt(backed * 1e9, bare, "the backstop holds it within reach");
+        assertLt(backed, 2_000e18);
+    }
+
+    function testRecenterMovesBothPositionsAndFloorsTheBackstop() public {
+        bandAndBackstop(1_000);
+        (int24 lower, int24 upper) = around(9.6e18, 200);
+        LiquidityLocker.Recenter memory r = params(9.6e18, lower, upper);
+        r.backstopBps = 1_000;
+        r.minBackstopLiquidity = type(uint128).max;
+        vm.startPrank(owner);
+        vm.expectPartialRevert(LiquidityLocker.LiquidityBelowFloor.selector);
+        locker.recenter(r);
+        r.minBackstopLiquidity = 0;
+        r.backstopBps = 10_001;
+        vm.expectRevert(LiquidityLocker.BadBackstop.selector);
+        locker.recenter(r);
+        r.backstopBps = 1_000;
+        locker.recenter(r);
+        vm.stopPrank();
+        assertApproxEqRel(poolUsd(key, address(index)), 9.6e18, 1e14);
+        assertGt(locker.backstopLiquidity(address(index)), 0);
+        (int24 l,,,,,) = locker.books(address(index));
+        assertEq(l, lower, "the band moved");
+    }
+
+    function testDepositSplitsIntoBandAndBackstop() public {
+        (int24 lower, int24 upper) = around(10.08e18, 200);
+        (uint256 a0, uint256 a1) = shareIs0 ? (uint256(2.5e18), uint256(25.2e6)) : (uint256(25.2e6), uint256(2.5e18));
+        vm.prank(owner);
+        uint128 band = locker.deposit(address(index), a0, a1, lower, upper, 1_000, 0, block.timestamp);
+        assertEq(locker.positionLiquidity(address(index)), band);
+        assertGt(locker.backstopLiquidity(address(index)), 0);
+        assertApproxEqRel(value(10.08e18), 50.4e6, 1e15, "all of it is in the locker");
+    }
+
+    // ------------------------------------------------------------------ no lock
+
+    function testUnlockedAtDeployTheOwnerWithdrawsAtOnce() public {
+        LiquidityLocker open = new LiquidityLocker(pm, markets, owner, uint64(block.timestamp), OWNER_MOVE, OPERATOR_MOVE,
+            COOLDOWN, MAX_LOSS);
+        assertEq(open.lockedUntil(address(index)), block.timestamp);
+        (uint256 a0, uint256 a1) = shareIs0 ? (uint256(2.5e18), uint256(25.2e6)) : (uint256(25.2e6), uint256(2.5e18));
+        (int24 lower, int24 upper) = around(10.08e18, 200);
+        uint256 shares = index.balanceOf(owner);
+        uint256 quote = usd.balanceOf(owner);
+        vm.startPrank(owner);
+        index.approve(address(open), type(uint256).max);
+        usd.approve(address(open), type(uint256).max);
+        open.deposit(address(index), a0, a1, lower, upper, 1_000, 0, block.timestamp);
+        open.withdraw(address(index)); // same block: nothing held it
+        vm.stopPrank();
+        assertEq(open.positionLiquidity(address(index)), 0);
+        assertEq(open.backstopLiquidity(address(index)), 0);
+        assertApproxEqAbs(index.balanceOf(owner), shares, 1e7, "every share back");
+        assertApproxEqAbs(usd.balanceOf(owner), quote, 2, "every dollar back");
+
+        // And the lock is still there to use later: extended, it holds.
+        vm.startPrank(owner);
+        open.deposit(address(index), a0, a1, lower, upper, 1_000, 0, block.timestamp);
+        open.extendLock(uint64(block.timestamp + 30 days));
+        vm.expectRevert(LiquidityLocker.Locked.selector);
+        open.withdraw(address(index));
+        vm.stopPrank();
     }
 }

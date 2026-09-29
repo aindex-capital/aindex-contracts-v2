@@ -55,13 +55,13 @@ contract LiquidityLockerForkTest is Test {
 
     function testMoveTheOfficialPositionInAndRecenterAtBacking() public {
         emit log_named_decimal_uint("AR10 backing, $", nav, 18);
+        vm.startPrank(OFFICIAL);
         _report("before: official full-range position");
 
         // 1. Out of the router, as the official wallet.
         uint128 official = ROUTER.positionLiquidity(key, OFFICIAL, FULL_LOWER, FULL_UPPER, bytes32(0));
         assertGt(official, 0, "the official wallet holds the position");
         assertEq(PM.getLiquidity(key.toId()), official, "and it is the pool's only liquidity");
-        vm.startPrank(OFFICIAL);
         BalanceDelta out = ROUTER.modifyLiquidity(key,
             ModifyLiquidityParams(FULL_LOWER, FULL_UPPER, -int256(uint256(official)), bytes32(0)), 0, 0, block.timestamp);
         uint256 usdg = uint256(int256(out.amount0()));
@@ -70,47 +70,51 @@ contract LiquidityLockerForkTest is Test {
         emit log_named_decimal_uint("withdrawn AR10", shares, 18);
 
         // 2. Into a locker, full range, where the pool already is.
-        locker = new LiquidityLocker(PM, REGISTRY, OFFICIAL, uint64(block.timestamp + 365 days), 1_500, 300, 4 hours, 50);
+        // Deployed as it will be on mainnet: unlocked (unlockAt = now), so the owner can withdraw at any time.
+        locker = new LiquidityLocker(PM, REGISTRY, OFFICIAL, uint64(block.timestamp), 1_500, 300, 4 hours, 50);
         IERC20(USDG).approve(address(locker), usdg);
         IERC20(AR10).approve(address(locker), shares);
-        uint128 deposited = locker.deposit(AR10, usdg, shares, FULL_LOWER, FULL_UPPER, official * 999 / 1_000, block.timestamp);
+        uint128 deposited = locker.deposit(AR10, usdg, shares, FULL_LOWER, FULL_UPPER, 0, official * 999 / 1_000, block.timestamp);
         emit log_named_uint("locker liquidity after deposit", deposited);
 
         // 3. Recenter at backing, full range.
         uint256 valueBefore = _value();
-        uint128 full = locker.recenter(_params(FULL_LOWER, FULL_UPPER, deposited * 95 / 100));
+        uint128 full = locker.recenter(_params(FULL_LOWER, FULL_UPPER, 0, deposited * 95 / 100));
         _report("after: locker, full range at backing");
-        emit log_named_uint("liquidity, full range", full);
         assertApproxEqRel(_poolUsd(), nav, 1e14, "pool at backing");
-        assertGe(_value() + 2, valueBefore, "no value lost");
+        assertGe(_value() + 3, valueBefore, "no value lost beyond rounding");
 
-        // 4. The same tokens in a band of about 2% either side of backing.
-        uint256 snap = vm.snapshotState();
+        // 4. The same tokens in a band of about 2% either side of backing, alone and with a backstop.
         (int24 lower, int24 upper) = _band(200);
-        uint128 narrow = locker.recenter(_params(lower, upper, full));
-        _report("after: locker, +-2% band at backing");
         emit log_named_int("band lower tick", lower);
         emit log_named_int("band upper tick", upper);
-        emit log_named_uint("liquidity, +-2% band", narrow);
-        assertGt(narrow, full * 40);
+        uint256 snap = vm.snapshotState();
+        uint128 bandOnly = locker.recenter(_params(lower, upper, 0, full));
+        _report("after: locker, +-2% band only");
+        assertGt(bandOnly, full * 40);
         vm.revertToState(snap);
+        uint128 band = locker.recenter(_params(lower, upper, 1_000, full));
+        emit log_named_uint("band liquidity with a 10% backstop", band);
+        emit log_named_uint("backstop liquidity", locker.backstopLiquidity(AR10));
+        _report("after: locker, +-2% band and a 10% full-range backstop");
+        assertApproxEqRel(_poolUsd(), nav, 1e14, "pool at backing");
+        assertGe(_value() + 3, valueBefore, "no value lost beyond rounding");
 
-        // 5. Locked until the date, then all of it comes back to the owner.
-        vm.expectRevert(LiquidityLocker.Locked.selector);
-        locker.withdraw(AR10);
-        vm.warp(block.timestamp + 365 days);
+        // 5. Deployed unlocked, so the owner can take all of it back at once.
         uint256 u0 = IERC20(USDG).balanceOf(OFFICIAL);
         uint256 s0 = IERC20(AR10).balanceOf(OFFICIAL);
         locker.withdraw(AR10);
         vm.stopPrank();
         uint256 back = (IERC20(AR10).balanceOf(OFFICIAL) - s0) * nav / 1e30 + IERC20(USDG).balanceOf(OFFICIAL) - u0;
-        emit log_named_decimal_uint("withdrawn after unlock, $ at backing", back, 6);
+        emit log_named_decimal_uint("withdrawn by the owner, $ at backing", back, 6);
         assertEq(PM.getLiquidity(key.toId()), 0);
     }
 
     // ------------------------------------------------------------------ helpers
 
-    function _params(int24 lower, int24 upper, uint128 minLiquidity) private view returns (LiquidityLocker.Recenter memory r) {
+    function _params(int24 lower, int24 upper, uint16 backstopBps, uint128 minLiquidity)
+        private view returns (LiquidityLocker.Recenter memory r)
+    {
         r.index = AR10;
         r.targetSqrtPriceX96 = _sqrtPriceAt(nav);
         r.tickLower = lower;
@@ -118,6 +122,7 @@ contract LiquidityLockerForkTest is Test {
         r.toleranceBps = 10;
         r.maxSwapIn = 1e6; // at most $1 of USDG or 1e-12 AR10: the pool is empty during the swap
         r.minLiquidity = minLiquidity;
+        r.backstopBps = backstopBps;
         r.deadline = block.timestamp + 600;
     }
 
@@ -144,25 +149,35 @@ contract LiquidityLockerForkTest is Test {
         return s * nav / 1e30 + u;
     }
 
-    /// @dev Pool price, and what $100 buys: its premium over backing and over the pool's own price.
+    /// @dev Pool price, and what a $20 and a $50 buy pay against backing and where they leave the price.
     function _report(string memory label) private {
         emit log(label);
         uint256 spot = _poolUsd();
         emit log_named_decimal_uint("  pool price, $", spot, 18);
         emit log_named_int("  pool vs backing, bps", (int256(spot) - int256(nav)) * 10_000 / int256(nav));
         emit log_named_uint("  pool liquidity", PM.getLiquidity(key.toId()));
-        BalanceDelta q = ROUTER.quoteExactInput(key, true, 100e6, TickMath.MIN_SQRT_PRICE + 1);
-        uint256 got = uint256(int256(q.amount1()));
-        uint256 paid = uint256(-int256(q.amount0())); // less than $100 when the range runs out
-        uint256 paidUsd18 = paid * 1e30 / got; // dollars per share paid on average
-        emit log_named_decimal_uint("  USDG a $100 buy spends", paid, 6);
-        emit log_named_decimal_uint("  AR10 it gets", got, 18);
-        emit log_named_decimal_uint("  average price paid, $", paidUsd18, 18);
-        emit log_named_int("  paid over backing, bps", (int256(paidUsd18) - int256(nav)) * 10_000 / int256(nav));
-        emit log_named_int("  paid over pool price, bps", (int256(paidUsd18) - int256(spot)) * 10_000 / int256(spot));
-        // A size both ranges can fill, so the two compare like for like.
-        q = ROUTER.quoteExactInput(key, true, 20e6, TickMath.MIN_SQRT_PRICE + 1);
-        paidUsd18 = uint256(-int256(q.amount0())) * 1e30 / uint256(int256(q.amount1()));
-        emit log_named_int("  $20 buy, paid over backing, bps", (int256(paidUsd18) - int256(nav)) * 10_000 / int256(nav));
+        _buy(20e6);
+        _buy(50e6);
+    }
+
+    /// @dev A real buy from a fresh wallet, rolled back afterwards.
+    function _buy(uint256 usdgIn) private {
+        uint256 snap = vm.snapshotState();
+        address buyer = address(0xB0B);
+        vm.stopPrank();
+        vm.prank(address(PM)); // the PoolManager holds USDG; any funded wallet would do
+        IERC20(USDG).transfer(buyer, usdgIn);
+        vm.startPrank(buyer);
+        IERC20(USDG).approve(address(ROUTER), usdgIn);
+        BalanceDelta d = ROUTER.swapExactInput(key, true, usdgIn, 1, TickMath.MIN_SQRT_PRICE + 1, block.timestamp);
+        vm.stopPrank();
+        uint256 paid = uint256(-int256(d.amount0()));
+        uint256 got = uint256(int256(d.amount1()));
+        uint256 average = paid * 1e30 / got;
+        emit log_named_decimal_uint(string.concat("  $", vm.toString(usdgIn / 1e6), " buy: AR10 received"), got, 18);
+        emit log_named_int("    average paid over backing, bps", (int256(average) - int256(nav)) * 10_000 / int256(nav));
+        emit log_named_decimal_uint("    pool price after, $", _poolUsd(), 18);
+        vm.revertToState(snap);
+        vm.startPrank(OFFICIAL);
     }
 }

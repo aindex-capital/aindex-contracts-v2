@@ -22,24 +22,26 @@ interface IMarketsLike {
 
 /**
  * @title  LiquidityLocker
- * @notice Holds the official liquidity in each index's share market until a set date, and can move
- *         it to where the index's backing is without ever letting it leave.
+ * @notice Holds the official liquidity in each index's share market and keeps it at the index's
+ *         backing. It can also lock that liquidity until a date, though it is deployed unlocked for
+ *         now: the project may migrate again, so the owner can withdraw at any time.
  *
- * @dev    ## WHY IT EXISTS
+ * @dev    ## TWO POSITIONS PER POOL
  *
- *         A pool whose only liquidity can be pulled at any moment reads as a rug risk ("LP not
- *         locked"), and a pool whose liquidity is locked in place can never follow its backing. The
- *         share of an index is worth its basket, so the market should sit there. This contract is
- *         both: the position is the locker's own in the PoolManager, nothing leaves before
- *         `lockedUntil`, and `recenter` can move the price and the range in one transaction.
+ *         The share of an index is worth its basket, so the market should sit there. Most of what
+ *         the locker holds for an index is a **band** around backing (salt 0), where it gives the
+ *         most depth. A small slice is a **backstop** across the full range (salt 1), so a trade that
+ *         runs through the band still meets liquidity and cannot push the price anywhere it likes.
+ *         Both belong to this contract in the PoolManager.
  *
  *         ## WHAT A RECENTER CAN AND CANNOT DO
  *
- *         Inside one `unlock`: remove the locker's position (fees included), swap toward the target
- *         with the target as the price limit, and add a new position from what the locker holds for
- *         that index. When the locker is the only provider the pool is empty during the swap, so the
- *         price moves for free. When others provide, the swap trades against them, always toward
- *         the target, so at the target's valuation it can only gain, less the pool and hook fees.
+ *         Inside one `unlock`: remove both positions (fees included), swap toward the target with the
+ *         target as the price limit, add the backstop from `backstopBps` of what the index holds and
+ *         the band from the rest. When the locker is the only provider the pool is empty during the
+ *         swap, so the price moves for free. When others provide, the swap trades against them,
+ *         always toward the target, so at the target's valuation it can only gain, less the pool and
+ *         hook fees.
  *
  *         Four checks bound a caller who is wrong or hostile:
  *         1. **Move cap.** The target may be at most `ownerMaxMoveBps` (owner) or
@@ -50,17 +52,25 @@ interface IMarketsLike {
  *            at most `maxLossBps` across the recenter. Tokens only ever move between the locker and
  *            the pool, so this is the whole of what a recenter can cost.
  *         3. **Price tolerance.** The pool must end within `toleranceBps` of the target.
- *         4. **Liquidity floor.** The new position must be at least the caller's `minLiquidity`.
+ *         4. **Liquidity floors.** The band and the backstop must each be at least the caller's
+ *            floor, and the band must hold the target.
  *
  *         What a recenter does not protect against is a wrong target: a price inside the move cap
- *         that is not the backing lets arbitrage take from the position. That is why the cap and the
- *         cooldown exist and why the operator can only ever recenter.
+ *         that is not the backing lets arbitrage take from the positions. That is why the cap and
+ *         the cooldown exist and why the operator can only ever recenter.
+ *
+ *         ## THE LOCK
+ *
+ *         `unlockAt` is set at deploy and may only move later (`extendLock`, `extendIndexLock`).
+ *         Before it, nothing leaves except into the pool. After it, `withdraw` sends an index's
+ *         positions and float to the owner. Deploying with `unlockAt` at or before the deploy time
+ *         leaves the owner free to withdraw at once; extending it later is what locks it.
  *
  *         ## FLOAT
  *
- *         Whatever does not fit the new range stays here as the index's float, counted per index so
- *         one market can never spend another's USDG. `topUp` adds to it. Tokens sent here by plain
- *         transfer are not counted and cannot be recovered.
+ *         Whatever does not fit stays here as the index's float, counted per index so one market can
+ *         never spend another's USDG. `topUp` adds to it. Tokens sent here by plain transfer are not
+ *         counted and cannot be recovered.
  *
  *         Not independently audited.
  */
@@ -71,8 +81,10 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
     uint256 internal constant BPS = 10_000;
     /// @notice The loosest price tolerance any recenter may ask for.
     uint16 public constant MAX_TOLERANCE_BPS = 100;
-    /// @notice The salt of every position this contract holds. One position per pool.
-    bytes32 public constant SALT = bytes32(0);
+    /// @notice The salt of the band around backing, one per pool.
+    bytes32 public constant BAND_SALT = bytes32(0);
+    /// @notice The salt of the full-range backstop, one per pool.
+    bytes32 public constant BACKSTOP_SALT = bytes32(uint256(1));
 
     IPoolManager public immutable manager;
     IMarketsLike public immutable registry;
@@ -86,7 +98,8 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
     /// @notice Largest fall in the index's holdings, valued at the target, one recenter may cause.
     uint16 public immutable maxLossBps;
 
-    /// @notice Nothing leaves before this, for any index. May only move later.
+    /// @notice Nothing leaves before this, for any index. May only move later. At or before the
+    ///         deploy time, nothing is locked.
     uint64 public unlockAt;
     /// @notice May call `recenter` and nothing else. Zero when there is none.
     address public operator;
@@ -109,7 +122,9 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         int24 tickUpper;
         uint16 toleranceBps;
         uint256 maxSwapIn; // cap on the swap's input; the pool's empty case needs only dust
-        uint128 minLiquidity;
+        uint128 minLiquidity; // floor for the band
+        uint16 backstopBps; // share of each token the index holds that goes to the full-range backstop
+        uint128 minBackstopLiquidity;
         uint256 deadline;
     }
 
@@ -134,13 +149,16 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
     error InsufficientFloat();
     error UnauthorizedCallback();
     error InvalidConfig();
+    error BadBackstop();
 
     event Deposited(address indexed index, int24 lower, int24 upper, uint256 paid0, uint256 paid1,
-        uint128 liquidityAdded, uint128 liquidity);
+        uint128 bandAdded, uint128 backstopAdded);
     event ToppedUp(address indexed index, uint256 amount0, uint256 amount1);
     event Recentered(address indexed index, address indexed caller, uint160 fromSqrtPriceX96, uint160 toSqrtPriceX96,
         int24 lower, int24 upper, uint128 liquidityBefore, uint128 liquidityAfter, uint256 valueBefore, uint256 valueAfter);
-    event Withdrawn(address indexed index, address indexed to, uint256 amount0, uint256 amount1, uint128 liquidity);
+    /// @notice The backstop's liquidity after a recenter; `Recentered` reports the band's.
+    event BackstopSet(address indexed index, uint128 liquidity);
+    event Withdrawn(address indexed index, address indexed to, uint256 amount0, uint256 amount1, uint128 band, uint128 backstop);
     event LockExtended(uint64 unlockAt);
     event IndexLockExtended(address indexed index, uint64 unlockAt);
     event OperatorSet(address indexed operator);
@@ -161,7 +179,7 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         uint16 maxLossBps_
     ) {
         if (address(manager_).code.length == 0 || address(registry_).code.length == 0 || owner_ == address(0)
-            || unlockAt_ <= block.timestamp || ownerMaxMoveBps_ == 0 || operatorMaxMoveBps_ > ownerMaxMoveBps_
+            || ownerMaxMoveBps_ == 0 || operatorMaxMoveBps_ > ownerMaxMoveBps_
             || maxLossBps_ > 1_000) revert InvalidConfig();
         manager = manager_;
         registry = registry_;
@@ -187,21 +205,37 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         return own > unlockAt ? own : unlockAt;
     }
 
+    /// @notice The band's liquidity.
     function positionLiquidity(address index) public view returns (uint128 liquidity) {
         Book storage b = books[index];
         if (b.lower == b.upper) return 0;
-        (liquidity,,) = manager.getPositionInfo(market(index).toId(), address(this), b.lower, b.upper, SALT);
+        (liquidity,,) = manager.getPositionInfo(market(index).toId(), address(this), b.lower, b.upper, BAND_SALT);
     }
 
-    /// @notice The position's tokens at the pool's price, rounded down, plus the float. Fees excluded.
+    /// @notice The full-range backstop's liquidity.
+    function backstopLiquidity(address index) public view returns (uint128 liquidity) {
+        PoolKey memory key = market(index);
+        (int24 lower, int24 upper) = _fullRange(key);
+        (liquidity,,) = manager.getPositionInfo(key.toId(), address(this), lower, upper, BACKSTOP_SALT);
+    }
+
+    /// @notice Both positions' tokens at the pool's price, rounded down, plus the float. Fees excluded.
     function holdings(address index) external view returns (uint256 amount0, uint256 amount1) {
         Book storage b = books[index];
+        PoolKey memory key = market(index);
         (amount0, amount1) = (b.float0, b.float1);
-        uint128 liquidity = positionLiquidity(index);
-        if (liquidity == 0) return (amount0, amount1);
-        (uint160 price,,,) = manager.getSlot0(market(index).toId());
-        (uint256 p0, uint256 p1) = _amountsFor(price, b.lower, b.upper, liquidity);
-        return (amount0 + p0, amount1 + p1);
+        (uint160 price,,,) = manager.getSlot0(key.toId());
+        uint128 band = positionLiquidity(index);
+        if (band != 0) {
+            (uint256 p0, uint256 p1) = _amountsFor(price, b.lower, b.upper, band);
+            (amount0, amount1) = (amount0 + p0, amount1 + p1);
+        }
+        uint128 backstop = backstopLiquidity(index);
+        if (backstop != 0) {
+            (int24 lower, int24 upper) = _fullRange(key);
+            (uint256 p0, uint256 p1) = _amountsFor(price, lower, upper, backstop);
+            (amount0, amount1) = (amount0 + p0, amount1 + p1);
+        }
     }
 
     // ------------------------------------------------------------------ owner
@@ -230,13 +264,15 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
     }
 
     /**
-     * @notice Fund the index's float and add all of it that fits as liquidity at the pool's price.
-     * @dev    The first deposit sets the range; later ones must use the same range, and a new range
-     *         comes only from `recenter`. What does not fit stays as float.
+     * @notice Fund the index's float and add it at the pool's price: `backstopBps` of each token to
+     *         the full-range backstop, and all of the rest that fits to the band.
+     * @dev    The first deposit sets the band's range; later ones must use the same range, and a new
+     *         range comes only from `recenter`. What does not fit stays as float.
      */
-    function deposit(address index, uint256 amount0, uint256 amount1, int24 lower, int24 upper, uint128 minLiquidity,
-        uint256 deadline) external onlyOwner nonReentrant returns (uint128 added)
+    function deposit(address index, uint256 amount0, uint256 amount1, int24 lower, int24 upper, uint16 backstopBps,
+        uint128 minLiquidity, uint256 deadline) external onlyOwner nonReentrant returns (uint128 added)
     {
+        if (backstopBps > BPS) revert BadBackstop();
         if (block.timestamp > deadline) revert Expired();
         PoolKey memory key = market(index);
         Book storage b = books[index];
@@ -247,14 +283,14 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
             (b.lower, b.upper) = (lower, upper);
         }
         _pull(key, index, amount0, amount1);
-        added = abi.decode(_unlock(abi.encode(Action.Deposit, index, key, minLiquidity)), (uint128));
+        added = abi.decode(_unlock(abi.encode(Action.Deposit, index, key, minLiquidity, backstopBps)), (uint128));
     }
 
-    /// @notice After the lock, send the index's whole position and float to the owner.
+    /// @notice Once unlocked, send the index's positions and float to the owner.
     function withdraw(address index) external onlyOwner nonReentrant {
         if (block.timestamp < lockedUntil(index)) revert Locked();
         PoolKey memory key = market(index);
-        _unlock(abi.encode(Action.Withdraw, index, key, uint128(0)));
+        _unlock(abi.encode(Action.Withdraw, index, key, uint128(0), uint16(0)));
     }
 
     // ------------------------------------------------------------------ recenter
@@ -272,6 +308,7 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
             revert NotAllowed();
         }
         if (r.toleranceBps > MAX_TOLERANCE_BPS) revert BadTolerance();
+        if (r.backstopBps > BPS) revert BadBackstop();
         PoolKey memory key = market(r.index);
         _checkRange(key, r.tickLower, r.tickUpper);
         if (r.targetSqrtPriceX96 < TickMath.MIN_SQRT_PRICE || r.targetSqrtPriceX96 >= TickMath.MAX_SQRT_PRICE) revert BadRange();
@@ -303,37 +340,45 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
                 abi.decode(data, (Action, address, PoolKey, Recenter, address));
             return abi.encode(_recenter(r, k, caller));
         }
-        (, address index, PoolKey memory key, uint128 minLiquidity) = abi.decode(data, (Action, address, PoolKey, uint128));
-        if (action == Action.Deposit) return abi.encode(_deposit(index, key, minLiquidity));
+        (, address index, PoolKey memory key, uint128 minLiquidity, uint16 backstopBps) =
+            abi.decode(data, (Action, address, PoolKey, uint128, uint16));
+        if (action == Action.Deposit) return abi.encode(_deposit(index, key, minLiquidity, backstopBps));
         _withdraw(index, key);
         return "";
     }
 
-    function _deposit(address index, PoolKey memory key, uint128 minLiquidity) private returns (uint128 added) {
+    function _deposit(address index, PoolKey memory key, uint128 minLiquidity, uint16 backstopBps)
+        private returns (uint128 added)
+    {
         Book storage b = books[index];
+        int256[2] memory net;
         (uint160 price,,,) = manager.getSlot0(key.toId());
+        uint128 backstop = _addBackstop(key, b, price, backstopBps, net);
         added = _liquidityFor(price, b.lower, b.upper, b.float0, b.float1);
         if (added == 0 || added < minLiquidity) revert LiquidityBelowFloor(added);
-        BalanceDelta d = _modify(key, b.lower, b.upper, int256(uint256(added)));
-        _book(b, d);
-        _settleBoth(key, d);
-        uint128 total = positionLiquidity(index);
-        emit Deposited(index, b.lower, b.upper, _owed(d.amount0()), _owed(d.amount1()), added, total);
+        _change(key, b, b.lower, b.upper, BAND_SALT, int256(uint256(added)), net);
+        _settle(key.currency0, net[0]);
+        _settle(key.currency1, net[1]);
+        emit Deposited(index, b.lower, b.upper, _owed128(net[0]), _owed128(net[1]), added, backstop);
     }
 
     function _withdraw(address index, PoolKey memory key) private {
         Book storage b = books[index];
-        uint128 liquidity = positionLiquidity(index);
-        if (liquidity != 0) {
-            BalanceDelta d = _modify(key, b.lower, b.upper, -int256(uint256(liquidity)));
-            _book(b, d);
-            _settleBoth(key, d);
+        int256[2] memory net;
+        uint128 band = positionLiquidity(index);
+        uint128 backstop = backstopLiquidity(index);
+        if (band != 0) _change(key, b, b.lower, b.upper, BAND_SALT, -int256(uint256(band)), net);
+        if (backstop != 0) {
+            (int24 lower, int24 upper) = _fullRange(key);
+            _change(key, b, lower, upper, BACKSTOP_SALT, -int256(uint256(backstop)), net);
         }
+        _settle(key.currency0, net[0]);
+        _settle(key.currency1, net[1]);
         (uint256 out0, uint256 out1) = (b.float0, b.float1);
         (b.float0, b.float1) = (0, 0);
         if (out0 != 0) IERC20(Currency.unwrap(key.currency0)).safeTransfer(owner, out0);
         if (out1 != 0) IERC20(Currency.unwrap(key.currency1)).safeTransfer(owner, out1);
-        emit Withdrawn(index, owner, out0, out1, liquidity);
+        emit Withdrawn(index, owner, out0, out1, band, backstop);
     }
 
     /// @dev The figures a recenter reports, kept together so the function stays within the stack.
@@ -352,27 +397,35 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         Outcome memory o;
         (o.from,,,) = manager.getSlot0(key.toId());
 
-        // 1. Out of the pool, fees and all. From here the index's holdings are its float.
+        // 1. Both positions out of the pool, fees and all. From here the index's holdings are its float.
         o.liquidityBefore = positionLiquidity(r.index);
-        if (o.liquidityBefore != 0) _change(key, b, b.lower, b.upper, -int256(uint256(o.liquidityBefore)), net);
+        if (o.liquidityBefore != 0) _change(key, b, b.lower, b.upper, BAND_SALT, -int256(uint256(o.liquidityBefore)), net);
+        {
+            uint128 backstop = backstopLiquidity(r.index);
+            (int24 lower, int24 upper) = _fullRange(key);
+            if (backstop != 0) _change(key, b, lower, upper, BACKSTOP_SALT, -int256(uint256(backstop)), net);
+        }
         o.valueBefore = _value(b.float0, b.float1, r.targetSqrtPriceX96);
 
         // 2. To the target, with the target as the limit, so it can never overshoot.
         if (o.from != r.targetSqrtPriceX96) _swapTo(key, b, r.targetSqrtPriceX96 < o.from, r, net);
         (o.to,,,) = manager.getSlot0(key.toId());
         if (_moveBps(o.to, r.targetSqrtPriceX96) > r.toleranceBps) revert MissedTarget(o.to);
+        // Adding liquidity only moves tokens from the float into positions the index still owns, so
+        // what it holds now is what it holds at the end. The swap is the only step that can cost.
+        o.valueAfter = _value(b.float0, b.float1, r.targetSqrtPriceX96);
+        if (o.valueAfter * BPS < o.valueBefore * (BPS - maxLossBps)) revert ValueBelowFloor(o.valueBefore, o.valueAfter);
 
-        // 3. Back in, in the new range, with everything the index holds that fits.
+        // 3. Back in: the backstop from its share of each token, the band from everything else that fits.
+        uint128 backstopAfter = _addBackstop(key, b, o.to, r.backstopBps, net);
+        if (backstopAfter < r.minBackstopLiquidity) revert LiquidityBelowFloor(backstopAfter);
         (b.lower, b.upper) = (r.tickLower, r.tickUpper);
         o.liquidityAfter = _liquidityFor(o.to, r.tickLower, r.tickUpper, b.float0, b.float1);
         if (o.liquidityAfter < r.minLiquidity || o.liquidityAfter == 0) revert LiquidityBelowFloor(o.liquidityAfter);
-        BalanceDelta d = _change(key, b, r.tickLower, r.tickUpper, int256(uint256(o.liquidityAfter)), net);
-
-        // 4. The position's tokens are still the index's, so what was paid in counts.
-        o.valueAfter = _value(b.float0 + _owed(d.amount0()), b.float1 + _owed(d.amount1()), r.targetSqrtPriceX96);
-        if (o.valueAfter * BPS < o.valueBefore * (BPS - maxLossBps)) revert ValueBelowFloor(o.valueBefore, o.valueAfter);
+        _change(key, b, r.tickLower, r.tickUpper, BAND_SALT, int256(uint256(o.liquidityAfter)), net);
         emit Recentered(r.index, caller, o.from, o.to, r.tickLower, r.tickUpper, o.liquidityBefore, o.liquidityAfter,
             o.valueBefore, o.valueAfter);
+        emit BackstopSet(r.index, backstopAfter);
         _settle(key.currency0, net[0]);
         _settle(key.currency1, net[1]);
         return o.liquidityAfter;
@@ -388,10 +441,10 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         net[1] += d.amount1();
     }
 
-    function _change(PoolKey memory key, Book storage b, int24 lower, int24 upper, int256 liquidityDelta,
+    function _change(PoolKey memory key, Book storage b, int24 lower, int24 upper, bytes32 salt, int256 liquidityDelta,
         int256[2] memory net) private returns (BalanceDelta d)
     {
-        d = _modify(key, lower, upper, liquidityDelta);
+        (d,) = manager.modifyLiquidity(key, ModifyLiquidityParams(lower, upper, liquidityDelta, salt), "");
         _book(b, d);
         net[0] += d.amount0();
         net[1] += d.amount1();
@@ -407,8 +460,18 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         b.float1 += amount1;
     }
 
-    function _modify(PoolKey memory key, int24 lower, int24 upper, int256 liquidityDelta) private returns (BalanceDelta d) {
-        (d,) = manager.modifyLiquidity(key, ModifyLiquidityParams(lower, upper, liquidityDelta, SALT), "");
+    /// @dev Adds `bps` of each token the index holds as full-range liquidity. Zero bps adds nothing.
+    function _addBackstop(PoolKey memory key, Book storage b, uint160 price, uint16 bps, int256[2] memory net)
+        private returns (uint128 liquidity)
+    {
+        if (bps == 0) return 0;
+        (int24 lower, int24 upper) = _fullRange(key);
+        liquidity = _liquidityFor(price, lower, upper, b.float0 * bps / BPS, b.float1 * bps / BPS);
+        if (liquidity != 0) _change(key, b, lower, upper, BACKSTOP_SALT, int256(uint256(liquidity)), net);
+    }
+
+    function _fullRange(PoolKey memory key) private pure returns (int24, int24) {
+        return (TickMath.minUsableTick(key.tickSpacing), TickMath.maxUsableTick(key.tickSpacing));
     }
 
     /// @dev Moves a pool delta into the index's float. Underflow reverts: the float is all it may spend.
@@ -424,11 +487,6 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         return balance - owed;
     }
 
-    function _settleBoth(PoolKey memory key, BalanceDelta d) private {
-        _settle(key.currency0, d.amount0());
-        _settle(key.currency1, d.amount1());
-    }
-
     function _settle(Currency currency, int256 amount) private {
         if (amount < 0) {
             manager.sync(currency);
@@ -439,8 +497,8 @@ contract LiquidityLocker is IUnlockCallback, ReentrancyGuard {
         }
     }
 
-    function _owed(int128 amount) private pure returns (uint256) {
-        return amount < 0 ? uint256(-int256(amount)) : 0;
+    function _owed128(int256 amount) private pure returns (uint256) {
+        return amount < 0 ? uint256(-amount) : 0;
     }
 
     function _checkRange(PoolKey memory key, int24 lower, int24 upper) private pure {

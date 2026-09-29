@@ -132,28 +132,39 @@ Send nothing else from the deploying account while it runs: the registry's addre
 
 ## Liquidity locker
 
-`src/LiquidityLocker.sol` holds the official wallet's liquidity in each index's share market until
-a date, and can move it to backing without letting it leave. It is a new contract beside v3 and
-changes nothing deployed. Positions are the locker's own in the PoolManager (salt 0), not router
-positions, so `ShareMarketRouter`'s `LiquidityChanged` ledger does not see them.
+`src/LiquidityLocker.sol` holds the official wallet's liquidity in each index's share market and
+keeps it at backing. It is a new contract beside v3 and changes nothing deployed. It holds two
+positions per index in its own name in the PoolManager, so `ShareMarketRouter`'s
+`LiquidityChanged` ledger does not see them:
+- a **band** around backing (salt 0), where the depth is;
+- a **backstop** across the full range (salt 1), so a trade that runs through the band still
+  meets liquidity and cannot push the price anywhere it likes.
 
-- **The lock.** `unlockAt` is set at deploy and can only move later (`extendLock`, or
-  `extendIndexLock` for one index). Before it, nothing leaves: no function sends tokens anywhere but
-  the PoolManager. After it, `withdraw(index)` sends that index's position and float to the owner.
-- **`deposit` and `topUp`** are the owner's. The first deposit sets the range; the rest of what does
-  not fit stays as that index's float, counted per index so one market never spends another's USDG.
-- **`recenter`** removes the position, swaps to the target with the target as the price limit (free
-  when the locker is the only liquidity), and adds everything that fits in the new range, in one
-  transaction. It reverts unless the pool ends within `toleranceBps` (at most 1%) of the target, the
-  new liquidity is at least `minLiquidity`, the range holds the target, and the index's holdings
-  valued at the target fell by at most `maxLossBps`.
-- **Who may recenter.** The owner, up to `ownerMaxMoveBps` from the pool's price per call, and an
-  optional operator (`setOperator`, zero to revoke) up to `operatorMaxMoveBps` per call and once per
-  `operatorCooldown`. All four limits are immutable. A wrong target inside the cap is the one thing
-  the checks cannot catch: arbitrage then takes from the position, so keep the operator's cap small.
+The rest of the design:
+- **Not locked, for now.** It is deployed with `unlockAt` at the deploy time, so the owner can
+  `withdraw(index)` at any moment: the project may migrate again. `unlockAt` can only move later
+  (`extendLock`, or `extendIndexLock` for one index), which is how it would be locked in future.
+  Nothing leaves before `unlockAt` except into the pool.
+- **`deposit` and `topUp`** are the owner's. A deposit puts `backstopBps` of each token into the
+  backstop and the rest that fits into the band. What does not fit stays as that index's float,
+  counted per index so one market never spends another's USDG.
+- **`recenter`** works in one transaction:
+  1. removes both positions;
+  2. swaps to the target, with the target as the price limit (free when the locker is the only
+     liquidity);
+  3. re-adds the backstop and the band from what the index holds.
 
-The commands below deploy it with owner 1,500 bps, operator 300 bps every 4 hours and a 50 bps loss floor. Tests:
-`test/LiquidityLocker.t.sol` (19, one fuzz) and, on a fork,
+  It reverts unless the pool ends within `toleranceBps` (at most 1%) of the target and the band
+  holds the target. Each position must also reach its caller-set floor. The index's holdings,
+  valued at the target, may fall by at most `maxLossBps`.
+- **Who may recenter.** The owner, up to `ownerMaxMoveBps` from the pool's price per call. An
+  optional operator (`setOperator`, zero to revoke) gets up to `operatorMaxMoveBps` per call, once
+  per `operatorCooldown`. All four limits are immutable. A wrong target inside the cap is the one
+  thing the checks cannot catch: arbitrage then takes from the positions, so keep the operator's
+  cap small.
+
+The commands below deploy it with owner 1,500 bps, operator 300 bps every 4 hours and a 50 bps
+loss floor. Tests: `test/LiquidityLocker.t.sol` (24, one fuzz) and, on a fork,
 `test/fork/LiquidityLockerFork.t.sol`:
 
 ```sh
@@ -165,20 +176,20 @@ AINDEX_AR10_NAV_USD18=$(curl -s https://aindex.capital/v2/indexes/0xf922df1f829d
 
 ### Going live (the official wallet runs these)
 
-1. Deploy, from `aindex-contracts-v2/`. `UNLOCK` is the lock date as a Unix time; it can be
-   extended later but never shortened.
+1. Deploy, from `aindex-contracts-v2/`, unlocked (`unlockAt` is now).
 
 ```sh
 set -a; . ./.env; set +a                      # DEPLOYER_PRIVATE_KEY, the official wallet 0x9168..492C
-UNLOCK=$(date -v+1y +%s)                      # one year from now
 forge create src/LiquidityLocker.sol:LiquidityLocker --rpc-url https://rpc.mainnet.chain.robinhood.com \
   --private-key "$DEPLOYER_PRIVATE_KEY" --broadcast --constructor-args \
   0x8366a39cc670b4001a1121b8f6a443a643e40951 0x2F8015CA784f7eEEb0AbcF854c92A363D58E9f7e \
-  0x916817f2c44c44f0255249140300e78afd6c492c "$UNLOCK" 1500 300 14400 50
+  0x916817f2c44c44f0255249140300e78afd6c492c "$(date +%s)" 1500 300 14400 50
 ```
 
 2. Move AR10, ADIV and AIXSTR's official positions in, then recenter at backing, from `aindex/`.
-   Both are dry runs until `--send`; a rerun skips what is already moved or already at backing.
+   Each command is a dry run until `--send`. A rerun skips what is already moved or already at
+   backing. The shape defaults to `--band 200 --backstop 1000`: a band 2% either side of backing,
+   and 10% of each token full range.
 
 ```sh
 export AINDEX_LP_LOCKER=<locker address> AINDEX_LOCKER_KEY=$DEPLOYER_PRIVATE_KEY
@@ -201,10 +212,10 @@ cast send <locker address> "setOperator(address)" <operator address> \
 */30 * * * * cd /path/to/aindex && set -a && . .local/locker.env && set +a && npx tsx deploy/lp-locker.ts recenter --send >> .local/lp-locker.log 2>&1
 ```
 
-`--band 200` recenters into a band 2% either side of backing instead of the position's own range:
-about 80 times the depth near backing with the same tokens, and none past the band. Rehearse any of
-this on a fork with `--fork http://127.0.0.1:8571` (and `--as <address>` to act as the operator).
-After the unlock date: `cast send <locker> "withdraw(address)" <index>` from the official wallet.
+To take a position back at any time, from the official wallet:
+`cast send <locker> "withdraw(address)" <index> --rpc-url https://rpc.mainnet.chain.robinhood.com --private-key "$DEPLOYER_PRIVATE_KEY"`.
+Rehearse any of this on a fork with `--fork http://127.0.0.1:8571` (and `--as <address>` to act
+as the operator).
 
 ## Authority map
 
