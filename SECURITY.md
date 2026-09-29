@@ -2,25 +2,56 @@
 
 ## Status
 
-Deployed to Robinhood Chain mainnet on 2026-09-24 (addresses in `README.md` and
-`deployments/4663.json`). Not audited. See `audits/README.md`.
+The v3 contracts are deployed on Robinhood Chain mainnet (chain id 4663) and hold user funds.
+Addresses are in [README.md](README.md#deployment-robinhood-chain-mainnet-v3) and
+`deployments/4663-v3.json`. **They have not been audited.** See [audits/README.md](audits/README.md).
+The contracts are immutable, so a vulnerability cannot be patched in place; a fix means a new
+deployment and a migration.
 
-## Reporting
+## Reporting a vulnerability
 
-Security issues go to the maintainers privately rather than to the issue tracker.
+Report privately through GitHub: open the repository's **Security** tab and choose **Report a
+vulnerability** (GitHub private vulnerability reporting). Do not open a public issue or pull
+request for a vulnerability.
 
-## What the design rests on
+Please include the affected contract and address, a description of the issue, and a proof of
+concept (for example a Foundry test, which can run against a mainnet fork as described in the
+README).
 
-Stated here because a reviewer should be able to check the claims rather than find them scattered
-through comments.
+## Scope
 
-- **The vault never prices anything.** Mint and redeem are proportional against balances Folio
-  reads directly. No oracle sits on a path that can move backing.
-- **The fee hook cannot reach backing.** It takes from the swap output via `afterSwap` and holds
-  what it takes. It has no authority over any vault.
+In scope:
+
+- The contracts in `src/` as deployed at the v3 addresses listed in the README.
+- `LiquidityLocker`, which is not deployed yet.
+- `script/Deploy.s.sol` and `script/deploy-v3.sh`, where a flaw would affect a deployment.
+
+Out of scope:
+
+- Reserve's Folio (`reserve-protocol/reserve-index-dtf`) and Uniswap v4-core. Report issues in
+  them to their maintainers, unless the issue arises from how these contracts use them.
+- The retired v2 deployment in `deployments/4663.json`.
+- Websites, APIs and other off-chain software.
+- Risks already described in the README's Risks section, such as a basket token that stops
+  transferring, unless you find a way to cause harm beyond what is described there.
+
+## Bug bounty
+
+There is no bug bounty program at this time.
+
+## What the design relies on
+
+These are the properties a reviewer should be able to check against the code.
+
+- **Minting and redeeming never use a price.** Folio mints and redeems proportionally against the
+  balances it holds. No oracle is on a path that can change backing.
+- **The fee hook has no authority over any index.** It takes its fee in `afterSwap` from the swap
+  result and holds it until `claim` or `payHolders` pays fixed destinations.
 - **The router lends its position salt to exactly one address**, the factory, and only to add
-  liquidity. Withdrawal always derives its salt from `msg.sender`.
-- **A rebalance is an auction, not a price.** `MonthlyMandate` queues, has an independent reviewer
-  approve, and settles through Folio. Nothing in this repository decides what an asset is worth.
-- **Roles recover on a delay.** Seven days, authorised by the two other role holders, and
+  liquidity. Removing liquidity always derives the position from `msg.sender`.
+- **A rebalance is one auction on bounded prices.** `MonthlyMandate` builds the auction's price
+  bands from reviewer prices that must stay within fixed limits of the queued proposal, and opens
+  exactly one auction per interval.
+- **Each index's only admin is its mandate**, checked at activation and before every execution.
+- **Roles recover on a delay** of at least 7 days, authorised by the two other role holders, and
   acceptance invalidates outstanding proposals.

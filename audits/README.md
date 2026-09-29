@@ -1,23 +1,26 @@
 # Audits
 
 **There are none.** Nothing in this repository has been audited or reviewed by anyone outside the
-project. It was deployed to Robinhood Chain mainnet on 2026-09-24 anyway, as a deliberate choice
-for a small launch, and it holds real money from then on. The contracts are immutable, so a flaw
-cannot be patched in place.
+project. The v3 contracts are nevertheless deployed on Robinhood Chain mainnet and hold user funds,
+and they are immutable, so a flaw cannot be patched in place.
 
-This directory exists so that the absence is stated where a reader looks for the presence, rather
-than inferred from a missing folder. Reserve's own repository, which this one depends on, carries
-four: cantina, pashov, trail-of-bits and trust-security. That is the standard this is measured
-against and does not meet.
+This directory states that absence where a reader would look for reports. When an audit is done,
+each auditor's report will be added here in its own subdirectory, together with the commit it
+covers.
 
-When an audit happens, one subdirectory per auditor with the report and the commit it covers.
+## Suggested review order
 
-## What most needs review, in order
+1. `MonthlyMandate`: rebalance authority, price bounds, token additions and role recovery.
+2. `ShareFeeHook`: in the swap path of every trade on an index pool; holds accrued fees.
+3. `ShareMarketRouter`: moves user funds and lends its position salt to the factory.
+4. `IndexFactory`, `IndexFactoryBase` and `IndexMarketRegistry`: what a launch creates and who
+   holds which role afterwards.
+5. `IndexZap` and `AuctionFiller`: execute off-chain planned router calldata.
+6. `AixDistributor`: Merkle payouts.
+7. `LiquidityLocker`: not deployed yet.
 
-1. `MonthlyMandate` holds the rebalance authority and the role recovery.
-2. `ShareFeeHook` sits in the swap path of every trade.
-3. `ShareMarketRouter` moves user funds and lends its position salt to the factory.
-4. `IndexMarketRegistry` and `IndexFactory` decide what a launch is.
+## Dependencies
 
-`lib/reserve-index-dtf` is Reserve's audited code, unmodified, pinned by commit and lockfile hash,
-and cloned immutably. That is the one part with review behind it, and the review is theirs.
+Reserve's Folio (`reserve-protocol/reserve-index-dtf`) is used unmodified, pinned by commit and
+lockfile hash in `dependencies.json`. Its own audit reports are in the `audits/` directory of that
+repository. Those audits cover Folio, not the contracts in this repository.

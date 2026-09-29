@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 #
 # Deploy v3 to Robinhood Chain mainnet: the factory stack (Deploy.s.sol), then the index zap and the
-# auction filler bound to the new factory. Writes every address to deployments/4663-v3.json.
+# auction filler bound to the new factory. Writes every address to deployments/4663-v3.json and
+# refuses to run if that file already exists.
 #
-#   script/deploy-v3.sh            from aindex-contracts-v2/, with .env holding DEPLOYER_PRIVATE_KEY,
-#                                  AINDEX_PROTOCOL_RECIPIENT and AINDEX_QUOTES (the same as v2)
+#   script/deploy-v3.sh            from any directory (it runs at the repository root), with a .env
+#                                  file there defining DEPLOYER_PRIVATE_KEY, AINDEX_PROTOCOL_RECIPIENT and AINDEX_QUOTES
+#                                  (comma-separated quote token addresses). AINDEX_RPC overrides the
+#                                  default RPC. .env is ignored by git.
 #
-# Rehearsed on a mainnet fork on 2026-09-28 (Deploy.s.sol's own read-back checks all passed).
+# Simulate Deploy.s.sol against a mainnet fork before broadcasting.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
