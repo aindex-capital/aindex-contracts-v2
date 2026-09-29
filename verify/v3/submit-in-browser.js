@@ -172,8 +172,20 @@
   box.textContent = "AINDEX v3: select every JSON in verify/v3/ ";
   const input = document.createElement("input");
   input.type = "file"; input.multiple = true; input.accept = ".json";
-  input.onchange = () => { box.remove(); run(input.files); };
+  // Picks add up: some browsers (Safari) drop part of a multi-selection, so choose again until
+  // nothing is missing; it starts on its own once every file is in.
+  const picked = {};
+  const need = [...new Set(ENTRIES.filter((e) => !ONLY.length || ONLY.includes(e.label)).map((e) => e.file))];
+  const note = document.createElement("div");
+  const refresh = () => {
+    const missing = need.filter((f) => !picked[f]);
+    note.textContent = missing.length ? `Still needed (${missing.length}): ${missing.join(", ")}` : "All files in. Submitting...";
+    if (!missing.length) { box.remove(); run(Object.values(picked)); }
+  };
+  input.onchange = () => { for (const f of input.files) picked[f.name] = f; input.value = ""; refresh(); };
   box.appendChild(input);
+  box.appendChild(note);
+  refresh();
   document.body.appendChild(box);
   console.log(`Ready: ${ENTRIES.length} entries. Pick the files in the box at the top left.`);
 })();
