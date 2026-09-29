@@ -36,8 +36,8 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
  * The protocol recipient is the one lasting address. It receives the protocol's mint and trade
  * fees and is immutable in both the fee registry and the hook.
  *
- * The addresses are written to `deployments/4663.json`, which is what the application's manifest
- * is built from (`aindex/deploy/manifest.mjs`).
+ * The addresses are written to `deployments/4663.json` (override with AINDEX_DEPLOYMENT_OUT), read back
+ * from the chain and checked before the record is written.
  */
 contract Deploy is Script {
     address internal constant POOL_MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
